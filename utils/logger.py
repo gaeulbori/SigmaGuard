@@ -1,3 +1,16 @@
+"""
+[File Purpose]
+- 시스템 운영 로그 기록 및 OCI 서버 용량 최적화 관리.
+
+[Key Features]
+- Retention Policy: TimedRotatingFileHandler를 통해 30일(1개월)이 지난 로그는 자동 삭제(OCI Free Tier 용량 보호).
+- Dual Logging: 콘솔(실시간 모니터링)과 파일(사후 분석)에 동시 기록.
+- Singleton-safe: 핸들러 중복 등록 방지 로직으로 중복 로그 출력 차단.
+
+[Future Roadmap]
+- Log Level Config: settings.py와 연동하여 상황에 따른 로그 상세도(DEBUG/INFO) 조절 기능.
+- Error Alert: 특정 레벨(CRITICAL) 이상의 로그 발생 시 텔레그램 즉시 전송 연동.
+"""
 import logging
 import os
 from logging.handlers import TimedRotatingFileHandler

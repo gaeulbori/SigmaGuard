@@ -1,3 +1,15 @@
+"""
+[File Purpose]
+- 시스템 기동 전, 보안 키와 설정 데이터의 유효성을 사전에 검증하는 단위 테스트.
+
+[Key Features]
+- Connectivity Audit: 상위 common 폴더와의 물리적 연결 및 SecretConfig 클래스 임포트 여부 확인.
+- Schema Validation: YAML 설정 내 필수 항목(watchlist 등) 존재 여부 및 데이터 형식 검증.
+- Environment Check: OCI/로컬 환경에 따른 경로 무결성 테스트.
+
+[Future Roadmap]
+- CI/CD Integration: GitHub Push 시 자동으로 테스트를 수행하는 워크플로우 연동.
+"""
 import unittest
 import sys
 import os

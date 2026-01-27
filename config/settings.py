@@ -1,3 +1,17 @@
+"""
+[File Purpose]
+- 시스템 전역 설정 및 보안 키 관리 허브.
+- 로컬 PC와 OCI 서버 간의 경로 차이를 흡수하고, 상위 common 폴더의 자산을 안전하게 연결함.
+
+[Key Features]
+- Path Logic: 2단계 상위 디렉토리(parent.parent)를 추적하여 'common' 폴더 내 SecretConfig 및 YAML 로드.
+- Key Mapping: SecretConfig 내의 복잡한 딕셔너리 구조(BOTS/SG 등)를 단순 속성(TELEGRAM_TOKEN)으로 변환.
+- Case-Insensitive YAML: 대소문자 구분 없이 watchlist/WATCHLIST를 유연하게 로드.
+
+[Future Roadmap]
+- Multi-Broker Config: 한국투자증권(KIS) 및 해외 증권사 API 키 연동 로직 추가.
+- Dev/Prod Toggle: 테스트 환경과 OCI 실구동 환경의 설정을 분리하는 플래그 도입.
+"""
 import os
 import sys
 import yaml

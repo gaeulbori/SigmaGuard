@@ -1,4 +1,3 @@
-David님, 새로운 시스템의 **'정관(Articles of Incorporation)'**이자 **'감사 매뉴얼'**이 될 `README.md` 초안을 작성했습니다. 지금까지 우리가 머리를 맞대고 논의한 OCI 최적화 전략, 멀티 브로커 확장성, 그리고 
 ---
 
 # 🛡️ Sigma Guard v2.0: Quantitative Trading System

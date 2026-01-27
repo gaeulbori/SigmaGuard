@@ -1,4 +1,3 @@
----
 
 # 🛡️ Sigma Guard v2.0: Quantitative Trading System
 

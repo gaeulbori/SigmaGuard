@@ -1,0 +1,19 @@
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment & Config
+.env
+.venv
+venv/
+config/local_settings.py
+
+# Data & Logs (보안 및 용량 관리)
+logs/*.log
+data/ledgers/*.csv
+data/portfolio/*.json
+
+# OS files
+.DS_Store
+Thumbs.db

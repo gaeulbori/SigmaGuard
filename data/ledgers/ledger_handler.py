@@ -100,6 +100,13 @@ class LedgerHandler:
 
         if file_path.exists():
             df = pd.read_csv(file_path)
+            # --- [v8.9.7.1 긴급 패치: 데이터 타입 강제 변환] ---
+            # 숫자 데이터가 들어갈 컬럼들을 미리 float로 형변환하여 경고 방지
+            float_cols = [col for col in self.headers if col not in ["Audit_Date", "Ticker", "Name", "Trend_Scenario", "Livermore_Status", "Risk_Level"]]
+            for col in float_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
+            # -----------------------------------------------               
             existing_idx = df.index[df['Audit_Date'] == market_date].tolist()
             if existing_idx:
                 idx = existing_idx[0]

@@ -164,6 +164,14 @@ class RiskEngine:
             
         return round(multiplier, 2), scenario
 
+    def _get_level(self, score):
+        """[SOP] 점수 기반 리스크 레벨 숫자만 반환 (인터페이스용)"""
+        if score >= 81: return 5
+        elif score >= 66: return 4
+        elif score >= 46: return 3
+        elif score >= 26: return 2
+        else: return 1
+
     def get_sop_info(self, score):
         """David's SOP 5단계 기준 정합성 매핑"""
         if score >= 81:

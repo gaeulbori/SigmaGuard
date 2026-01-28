@@ -18,9 +18,9 @@ logger = setup_custom_logger("LedgerHandler")
 
 class LedgerHandler:
     def __init__(self):
-        self.data_dir = settings.DATA_DIR
+        self.data_dir = settings.DATA_DIR / "ledgers"
         if not self.data_dir.exists():
-            self.data_dir.mkdir(parents=True)
+            self.data_dir.mkdir(parents=True, exist_ok=True)
 
         # v8.9.7+ 표준 39개 헤더 정의
         self.headers = [

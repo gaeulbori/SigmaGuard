@@ -30,27 +30,39 @@ class TestIndicatorsAudit(unittest.TestCase):
     """[CPA Audit] SigmaGuard 기술 지표 산출 엔진 수학적 정밀도 전수 감사"""
 
     def setUp(self):
-        """테스트 시작 전 기초 데이터 구축 (ADX 감지를 위해 변동성 주입)"""
+        """테스트 시작 전 기초 데이터 구축"""
         self.indicators = Indicators()
-        periods = 300
-        dates = pd.date_range(start="2025-01-01", periods=periods)
         
-        # [수정] 선형 상승 데이터: High가 Low보다 더 빠르게 상승하도록 설정 (ADX 유도)
-        base_price = np.linspace(100, 200, periods)
+        # [A] 단기/중기 테스트용 데이터 (300일)
+        periods_short = 300
+        dates_short = pd.date_range(start="2025-01-01", periods=periods_short)
+        base_price_s = np.linspace(100, 200, periods_short)
+        
         self.linear_up = pd.DataFrame({
-            'High': base_price + np.linspace(1, 10, periods), # 고가는 더 높게 치고 올라감
-            'Low': base_price - 1,
-            'Close': base_price,
-            'Volume': [1000] * periods
-        }, index=dates)
+            'High': base_price_s + np.linspace(1, 10, periods_short),
+            'Low': base_price_s - 1,
+            'Close': base_price_s,
+            'Volume': [1000] * periods_short
+        }, index=dates_short)
         
-        # 횡보 데이터 (이전과 동일)
         self.flat = pd.DataFrame({
-            'High': [105] * periods,
-            'Low': [95] * periods,
-            'Close': [100] * periods,
-            'Volume': [1000] * periods
-        }, index=dates)
+            'High': [105] * periods_short,
+            'Low': [95] * periods_short,
+            'Close': [100] * periods_short,
+            'Volume': [1000] * periods_short
+        }, index=dates_short)
+
+        # [B] v8.9.7 장기 통계 테스트용 데이터 (1,500일 / 약 5.9년)
+        periods_long = 1500
+        dates_long = pd.date_range(start="2020-01-01", periods=periods_long)
+        base_price_l = np.linspace(100, 250, periods_long) # 완벽한 선형 상승
+        
+        self.long_term_df = pd.DataFrame({
+            'High': base_price_l + 2,
+            'Low': base_price_l - 2,
+            'Close': base_price_l,
+            'Volume': [1000] * periods_long
+        }, index=dates_long)
 
     def test_01_r_squared_precision(self):
         """검증 1: R2가 완벽한 직선 추세에서 1.0(또는 근사치)을 반환하는가?"""
@@ -147,6 +159,46 @@ class TestIndicatorsAudit(unittest.TestCase):
         # 선형 상승 시 MACD 히스토그램은 증가 추세를 보임
         self.assertIn("상승가속", trend.values)
         print("✅ MACD 트렌드 판정 로직 확인 완료")
+
+    def test_12_multi_sigma_audit(self):
+        """검증 12: 1y~5y 다중 시그마 산출 및 평균값(avg_sigma) 정합성 확인"""
+        print("\n🔍 [검증 12] v8.9.7 다중 시그마(1y~5y) 전수 감사 중...")
+        results = self.indicators.calc_multi_sigma(self.long_term_df)
+        
+        # 1. 모든 기간 컬럼 존재 여부 확인
+        for y in range(1, 6):
+            self.assertIn(f"sig_{y}y", results, f"❌ sig_{y}y 산출 누락")
+            
+        # 2. avg_sigma가 개별 시그마들의 산술 평균과 일치하는지 재검산
+        individual_sum = sum([results[f"sig_{y}y"].iloc[-1] for y in range(1, 6)])
+        expected_avg = round(individual_sum / 5, 2)
+        actual_avg = results['avg_sigma'].iloc[-1]
+        
+        self.assertAlmostEqual(actual_avg, expected_avg, places=1)
+        print(f"✅ 다중 시그마 및 평균치({actual_avg}σ) 정합성 확인 완료")
+
+    def test_13_relative_slope_normalization(self):
+        """검증 13: 상대적 기울기(%)가 주가 절대값에 관계없이 규격화되는지 확인"""
+        print("\n🔍 [검증 13] 상대적 기울기(%) 규격화 정밀도 감사 중...")
+        # 100에서 시작해 하루 1달러씩 오르는 20일 데이터 (기울기 1.0)
+        test_prices = np.linspace(100, 119, 20)
+        test_df = pd.DataFrame({'Close': test_prices})
+        
+        rel_slope = self.indicators.calc_relative_slope(test_df, 20).iloc[-1]
+        # (기울기 1.0 / 시작가 100.0) * 100 = 1.0% 산출 확인
+        self.assertAlmostEqual(rel_slope, 1.0, places=1)
+        print(f"✅ 상대적 기울기 % 규격화 확인 ({rel_slope:.2f}%)")
+
+    def test_14_dynamic_disparity_floor_audit(self):
+        """검증 14: 동적 이격 임계치가 David님의 하한선(110.0%)을 엄격히 준수하는가?"""
+        print("\n🔍 [검증 14] 동적 이격 임계치 하한선(110.0) 준수 여부 감사 중...")
+        # 변동성이 극도로 낮은 횡보 데이터 사용
+        limit_series, _ = self.indicators.calc_dynamic_disparity_limit(self.flat)
+        last_limit = limit_series.iloc[-1]
+        
+        # 변동성이 없어도 David님의 SOP에 따라 최소 110%는 유지해야 함
+        self.assertGreaterEqual(last_limit, 110.0)
+        print(f"✅ 이격 임계치 하한선(110.0) 방어 확인 (현재: {last_limit:.2f}%)")
 
 if __name__ == '__main__':
     unittest.main()

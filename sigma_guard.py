@@ -14,6 +14,7 @@ from core.risk_engine import RiskEngine
 from data.ledgers.ledger_handler import LedgerHandler
 from utils.logger import setup_custom_logger
 from datetime import datetime
+from utils.messenger import TelegramMessenger  # 추가된 모듈
 
 logger = setup_custom_logger("SigmaGuard_Main")
 
@@ -22,6 +23,8 @@ class SigmaGuard:
         self.indicators = Indicators()
         self.risk_engine = RiskEngine()
         self.ledger = LedgerHandler()
+        self.messenger = TelegramMessenger()  # 메신저 초기화
+
         logger.info("🛡️ SigmaGuard 시스템이 가동되었습니다. (v8.9.7+ Engine)")
 
     def run_audit(self, ticker, name):
@@ -78,10 +81,30 @@ class SigmaGuard:
             )
 
             current_level = self.risk_engine._get_level(final_score)
+            # 4. [신규] 텔레그램 리포트 발송
+            # 은퇴 후 여유로운 생활을 위해 Level 3(관망) 이상인 경우에만 알림
+            if current_level >= 3:
+                self.send_report(ticker, name, current_level, final_score, details)            
+            
             logger.info(f"✅ [{ticker}] 감사 완료: 현재 Level {current_level} ({grade_label})")
 
         except Exception as e:
             logger.error(f"❌ [{ticker}] 감사 중 치명적 오류: {e}")
+
+    def send_report(self, ticker, name, level, score, details):
+        """감사 결과를 CPA 보고서 형식으로 요약하여 전송"""
+        emoji = "🔴" if level >= 4 else "🟡"
+        message = (
+            f"{emoji} **[SG 감사 보고서] {name}({ticker})**\n"
+            f"--- \n"
+            f"• **현재 리스크**: Level {level}\n"
+            f"• **리스크 점수**: {score}점\n"
+            f"• **판단 시나리오**: {details['scenario']}\n"
+            f"• **권고 조치**: {details['action']}\n"
+            f"--- \n"
+            f"📅 기준일자: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
+        self.messenger.send_message(message)
 
     def execute_all(self, universe):
         """유니버스 전 종목 순회 감사"""

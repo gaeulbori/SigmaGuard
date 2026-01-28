@@ -11,6 +11,7 @@ config/local_settings.py
 
 # Data & Logs (보안 및 용량 관리)
 logs/*.log
+*.log.*
 data/ledgers/*.csv
 data/portfolio/*.json
 

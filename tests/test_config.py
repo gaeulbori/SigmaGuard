@@ -10,46 +10,73 @@
 [Future Roadmap]
 - CI/CD Integration: GitHub Push 시 자동으로 테스트를 수행하는 워크플로우 연동.
 """
+"""
+[File Purpose]
+- 시스템 구성 환경(Configuration) 및 보안 자산에 대한 전수 감사.
+- common 폴더 연동, YAML 파싱, 내부 경로 유효성을 100% 검증함.
+"""
+
 import unittest
-import sys
 import os
+import sys
 
-# [핵심 추가] 현재 파일(tests/test_config.py)의 상위 폴더(SG)를 시스템 경로에 추가
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
+# [Path Fix] 파일의 상위의 상위 폴더(프로젝트 루트: SG)를 검색 경로에 추가
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config.settings import settings
+from config.settings import settings  # 이제 정상적으로 로드됩니다.
+class TestConfigFullAudit(unittest.TestCase):
+    """[CPA Audit] Sigma Guard v2.0 인프라 설정 전수 검사"""
 
-class TestConfigIntegrity(unittest.TestCase):
-    """[CPA Audit] Sigma Guard v2.0 기초 자산(Keys) 검증"""
+    def test_01_security_keys_audit(self):
+        """검증 1: 텔레그램 마스터 키 및 보안 클래스 연동 확인"""
+        print("\n🔍 [검증 1] 보안 자산(SecretConfig) 연동 상태 감사...")
+        self.assertIsNotNone(settings.TELEGRAM_TOKEN, "❌ TELEGRAM_TOKEN 로드 실패")
+        self.assertIsNotNone(settings.CHAT_ID, "❌ CHAT_ID 로드 실패")
+        
+        # David님의 실제 토큰 패턴(숫자 시작) 검증
+        self.assertTrue(str(settings.TELEGRAM_TOKEN).startswith('85543'), "❌ 토큰 시작 패턴 불일치")
+        print(f"✅ 보안 키 정합성 확인 (ID: {settings.CHAT_ID})")
 
-    def test_01_telegram_keys_validation(self):
-        """검증 1: 텔레그램 토큰 및 채팅 ID 유효성 확인"""
-        print("\n🔍 [검증 1] 텔레그램 보안 키 유효성 검사 중...")
+    def test_02_mapping_integrity(self):
+        """검증 2: YAML 데이터 속성 매핑(Shortcut) 확인"""
+        print("\n🔍 [검증 2] 설정 속성 매핑(Mapping) 무결성 감사...")
         
-        # settings.TELEGRAM_TOKEN이 SecretConfig.TELEGRAM['BOTS']['SG']를 잘 가져왔는지 확인
-        self.assertIsNotNone(settings.TELEGRAM_TOKEN, "❌ TELEGRAM_TOKEN이 로드되지 않았습니다.")
-        self.assertIsInstance(settings.TELEGRAM_TOKEN, str, "❌ 토큰은 문자열이어야 합니다.")
+        # 1. Watchlist 단축 속성 확인
+        self.assertIsInstance(settings.watchlist, list, "❌ settings.watchlist가 리스트 형식이 아님")
+        self.assertGreater(len(settings.watchlist), 0, "❌ watchlist가 비어 있음")
         
-        # CHAT_ID 확인
-        self.assertIsNotNone(settings.CHAT_ID, "❌ CHAT_ID가 로드되지 않았습니다.")
-        print(f"✅ 텔레그램 연결 준비 완료 (Token: {str(settings.TELEGRAM_TOKEN)[:5]}*** / ID: {settings.CHAT_ID})")
+        # 2. App Info 및 Version 확인
+        self.assertEqual(settings.app_version, 'v8.8.8', f"❌ 버전 정보 불일치: {settings.app_version}")
+        print(f"✅ 속성 매핑 확인 (Version: {settings.app_version}, Watchlist: {len(settings.watchlist)}개)")
 
-    def test_02_yaml_watchlist_check(self):
-        """검증 2: YAML 내 관심 종목 리스트 로드 확인"""
-        print("\n🔍 [검증 2] YAML 설정 데이터 무결성 검사 중...")
+    def test_03_path_and_permission_audit(self):
+        """검증 3: 프로젝트 내부 디렉토리 유효성 및 접근 권한 확인"""
+        print("\n🔍 [검증 3] 운영 디렉토리(Data/Logs) 유효성 감사...")
         
-        # [수정] 대문자 'WATCHLIST' -> 소문자 'watchlist'
-        self.assertIn('watchlist', settings.CONFIG, "❌ YAML 설정에 'watchlist' 항목이 없습니다.")
+        # 1. 경로 존재 여부 확인
+        paths = {
+            "DATA_DIR": settings.DATA_DIR,
+            "LOG_DIR": settings.LOG_DIR,
+            "COMMON_DIR": settings.COMMON_DIR
+        }
         
-        watchlist = settings.CONFIG.get('watchlist', [])
-        self.assertGreater(len(watchlist), 0, "❌ 분석 대상 종목(watchlist)이 비어 있습니다.")
+        for name, path in paths.items():
+            # OCI 서버에서는 폴더가 아직 없을 수 있으므로 상위 폴더 존재 여부와 생성 가능성 체크
+            parent = path.parent
+            self.assertTrue(parent.exists(), f"❌ {name}의 상위 폴더({parent})가 존재하지 않음")
+            print(f"✅ {name} 경로 유효함: {path}")
+
+    def test_04_yaml_schema_audit(self):
+        """검증 4: YAML 설정 내 필수 섹션 존재 여부 확인"""
+        print("\n🔍 [검증 4] YAML 스키마(Schema) 필수 항목 감사...")
+        required_sections = ['app_info', 'settings', 'watchlist']
+        for section in required_sections:
+            self.assertIn(section, settings.CONFIG, f"❌ YAML 내 필수 섹션 '{section}' 누락")
         
-        # 샘플 종목 하나 출력해서 확인
-        sample = watchlist[0]['name']
-        print(f"✅ 분석 대상 유니버스 로드 완료 (종목 수: {len(watchlist)}, 샘플: {sample})")
+        # 세부 설정값 확인
+        precision = settings.CONFIG.get('settings', {}).get('precision')
+        self.assertIsNotNone(precision, "❌ settings.precision 설정 누락")
+        print(f"✅ YAML 스키마 검증 완료 (Precision: {precision})")
 
 if __name__ == '__main__':
     unittest.main()

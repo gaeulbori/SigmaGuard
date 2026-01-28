@@ -1,16 +1,19 @@
 """
 [File Purpose]
-- 종목별 기술 지표 및 확정된 리스크 레벨을 CSV 장부(Ledger)로 영구 저장 및 관리.
+- 3단계 보완: 종목별 기술 지표 저장 및 20일 사후 성과(Ret_20d) 자동 결산 엔진.
+- David님의 v8.9.7 표준 39개 헤더 규격 준수 및 전기 이월(Delta) 데이터 정합성 확보.
 
 [Key Features]
-- Future-Proofing: reindex를 사용하여 pandas의 FutureWarning(concat 관련) 해결.
-- Audit Integrity: 역산 없이 장부 내 'Risk_Level'을 직접 참조하여 과거 판단 근거 보존.
+- Post-Audit (사후 결산): 감사 20일 후 실제 수익률, 최고/최저 수익률을 yfinance로 추적하여 자동 기입.
+- Delta Tracking: 오늘 데이터를 제외한 최신 과거 기록을 참조하여 리스크 변동폭(▲/▼) 산출 지원.
+- KRW/USD Intelligent Formatting: 원화는 정수, 달러는 소수점 3자리로 통화별 맞춤형 기록.
 """
 
 import os
 import pandas as pd
 import numpy as np
-from datetime import datetime
+import yfinance as yf
+from datetime import datetime, timedelta
 from config.settings import settings
 from utils.logger import setup_custom_logger
 
@@ -22,7 +25,7 @@ class LedgerHandler:
         if not self.data_dir.exists():
             self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        # v8.9.7+ 표준 39개 헤더 정의
+        # v8.9.7+ 표준 39개 헤더 정의 (성과 분석 컬럼 포함)
         self.headers = [
             "Audit_Date", "Ticker", "Name", "Risk_Score", "Risk_Level", "Price_T",
             "Sigma_T_Avg", "Sigma_T_1y", "Sigma_T_2y", "Sigma_T_3y", "Sigma_T_4y", "Sigma_T_5y",
@@ -52,6 +55,7 @@ class LedgerHandler:
         return round(float(value), 3)
 
     def save_entry(self, ticker, name, market_date, tech_t, stat_t, tech_b, stat_b, score, details, alloc, bt_res, liv_status):
+        """[Audit Step] 당일 감사 결과를 장부에 기록 (Update or Insert)"""
         file_path = self._get_file_path(ticker)
         current_level = self._get_level(score)
         
@@ -99,30 +103,74 @@ class LedgerHandler:
             existing_idx = df.index[df['Audit_Date'] == market_date].tolist()
             if existing_idx:
                 idx = existing_idx[0]
+                # 기존 데이터 업데이트 시 사후 수익률 데이터가 있다면 보존
                 for key, val in row_data.items():
                     df.at[idx, key] = val
             else:
                 new_row_df = pd.DataFrame([row_data])
                 df = pd.concat([df, new_row_df], ignore_index=True)
         else:
-            # 신규 파일 생성 시 reindex를 사용하여 39개 컬럼 구조와 데이터를 동시에 확립
             df = pd.DataFrame([row_data])
             df = df.reindex(columns=self.headers)
 
         df.to_csv(file_path, index=False, encoding='utf-8-sig')
         logger.info(f"💾 [{ticker}] 장부 기록 완료: {market_date}")
 
+    def update_forward_returns(self, ticker):
+        """[Phase 3] 사후 성과 결산: 감사 20일 후의 실제 수익률 추적 및 기록"""
+        file_path = self._get_file_path(ticker)
+        if not file_path.exists(): return
+
+        df = pd.read_csv(file_path)
+        df['Audit_Date'] = pd.to_datetime(df['Audit_Date'])
+        
+        # 아직 결산되지 않았고(NaN), 감사일로부터 20일이 경과한 데이터 필터링
+        mask = df['Ret_20d'].isna() & (df['Audit_Date'] <= datetime.now() - timedelta(days=20))
+        target_rows = df[mask]
+
+        if target_rows.empty: return
+
+        logger.info(f"📈 [{ticker}] {len(target_rows)}건의 사후 수익률 결산 진행 중...")
+
+        for idx, row in target_rows.iterrows():
+            audit_date = row['Audit_Date']
+            # T+20일까지의 시세 데이터 확보 (넉넉히 30일치 다운로드)
+            try:
+                hist = yf.download(ticker, start=audit_date, end=audit_date + timedelta(days=30), progress=False, auto_adjust=True)
+                if not hist.empty:
+                    # 감사일 이후 약 15거래일(실제 20일 분량) 슬라이싱
+                    period_data = hist.iloc[:15]
+                    
+                    price_t0 = float(row['Price_T'])
+                    price_t20 = float(period_data['Close'].iloc[-1])
+                    max_p = float(period_data['High'].max())
+                    min_p = float(period_data['Low'].min())
+
+                    # 수익률 및 낙폭 기입
+                    df.at[idx, 'Ret_20d'] = round(((price_t20 - price_t0) / price_t0) * 100, 2)
+                    df.at[idx, 'Max_Ret_20d'] = round(((max_p - price_t0) / price_t0) * 100, 2)
+                    df.at[idx, 'Min_Ret_20d'] = round(((min_p - price_t0) / price_t0) * 100, 2)
+            except Exception as e:
+                logger.error(f"❌ [{ticker}] {audit_date.date()} 결산 중 오류: {e}")
+
+        # 날짜 포맷 복구 후 저장
+        df['Audit_Date'] = df['Audit_Date'].dt.strftime('%Y-%m-%d')
+        df.to_csv(file_path, index=False, encoding='utf-8-sig')
+        logger.info(f"✅ [{ticker}] 사후 수익률 결산 완료")
+
     def get_previous_state(self, ticker):
+        """[v8.9.7] 전기 이월 데이터 분석 (오늘 날짜 제외한 최신 기록)"""
         file_path = self._get_file_path(ticker)
         if not file_path.exists(): return None, None
         try:
             df = pd.read_csv(file_path)
             if df.empty: return None, None
             today_str = datetime.now().strftime("%Y-%m-%d")
+            # 오늘 기록을 제외하여 '순수 과거' 대조군 형성
             past_df = df[df['Audit_Date'] != today_str]
             if past_df.empty: return None, None
+            
             last_row = past_df.iloc[-1]
-            # 기록된 리스크 레벨과 점수를 직접 추출
             return int(last_row['Risk_Level']), float(last_row['Risk_Score'])
         except Exception as e:
             logger.error(f"⚠️ [{ticker}] 과거 장부 분석 실패: {e}")

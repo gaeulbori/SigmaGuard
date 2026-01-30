@@ -50,9 +50,9 @@ class Indicators:
             logger.error(f"❌ 데이터 로드 오류: {e}")
             return None
 
-    def generate(self, ticker):
+    def generate(self, ticker, period="6y"):
         """[Main Pipeline] 5개년 전수 분석 및 리스크 지표 통합 생성"""
-        df = self.fetch_data(ticker)
+        df = self.fetch_data(ticker, period=period)
         if df is None or len(df) < self.P_DISP:
             return None
 
@@ -95,21 +95,24 @@ class Indicators:
     # --- [v8.9.7 전용 고도화 메서드] ---
 
     def calc_multi_sigma(self, df):
-        """[v8.9.7] 1년~5년 구간별 시그마 및 통합 평균 시그마 산출"""
-        results = {}
-        all_sigmas = []
+        """다중 기간 시그마 산출 (최소 120일치만 있으면 계산 시작)"""
         
-        for y in range(1, 6):
-            window = y * 252
-            # 방금 복구한 calc_sigma를 내부적으로 호출하여 중복 제거
-            sigma_series = self.calc_sigma(df, window)
-            
-            results[f"sig_{y}y"] = sigma_series
-            all_sigmas.append(sigma_series)
-            
-        results['avg_sigma'] = sum(all_sigmas) / len(all_sigmas)
-        return results
+        # David님의 시스템 최소 기준인 120일(약 6개월)을 min_periods로 설정합니다.
+        min_obs = 120 
+        
+        # 252일(1년) 단위로 5년치까지 산출
+        df['sig_1y'] = df['Close'].rolling(window=252, min_periods=min_obs).std()
+        df['sig_2y'] = df['Close'].rolling(window=252*2, min_periods=min_obs).std()
+        df['sig_3y'] = df['Close'].rolling(window=252*3, min_periods=min_obs).std()
+        df['sig_4y'] = df['Close'].rolling(window=252*4, min_periods=min_obs).std()
+        df['sig_5y'] = df['Close'].rolling(window=252*5, min_periods=min_obs).std()
 
+        # 평균 시그마 산출 시에도 NaN을 제외하고 평균을 내도록 수정
+        sigma_cols = ['sig_1y', 'sig_2y', 'sig_3y', 'sig_4y', 'sig_5y']
+        df['avg_sigma'] = df[sigma_cols].mean(axis=1, skipna=True)
+        
+        return df
+    
     def calc_relative_slope(self, df, period):
         """
         주가 대비 상대적 % 기울기 산출

@@ -1,25 +1,18 @@
 """
 [File Purpose]
-- 시스템 분석 결과 및 알림 메시지를 외부(텔레그램)로 전달하는 전용 통로.
+- 시스템 분석 결과 및 감사 리포트를 외부(텔레그램)로 전달하는 전용 통로.
+- v9.0.0: OCI 및 로컬 환경의 SecretConfig에서 보안 토큰을 직접 주입받을 수 있도록 생성자(Constructor) 개선.
 
 [Key Features]
-- Config Integration: settings.py에 검증된 토큰과 ID를 사용하여 객체 생성 시 자동 연결.
-- HTML Support: 태그 기반 포맷팅(Bold, Italic 등)을 지원하여 가시성 높은 리포트 발송 가능.
-- Error Handling: 네트워크 오류나 API 제한 발생 시 Logger를 통한 예외 기록.
+- Flexible Initialization: 파라미터로 토큰을 받으면 최우선 적용, 없을 경우 settings.py 기본값 로드.
+- Message Chunking: 텔레그램 4,096자 제한을 고려하여 3,500자 단위로 자동 분할 전송(v8.9.7 정통 로직).
+- JSON Stability: requests의 json 파라미터를 사용하여 특수문자 및 유니코드(한글) 전송 안정성 확보.
+- Singleton Compatibility: 기존 테스트 코드와의 호환성을 위해 싱글톤 객체 및 래퍼 함수 유지.
 
 [Future Roadmap]
-- Rate Limiting: 200개 이상의 종목 알림 시 텔레그램 API 제한(429 Error)을 방지하는 큐(Queue) 시스템.
-- Media Support: 분석 차트(이미지)나 데이터 파일(CSV)을 직접 전송하는 기능 확장.
+- Media Support: 분석 차트(PNG) 및 감사 조서(CSV) 파일 전송 기능 추가 예정.
 """
-"""
-[File Purpose]
-- 시스템 분석 결과 및 알림 메시지를 외부(텔레그램)로 전달하는 전용 통로.
 
-[Key Features]
-- Message Chunking: [추가] 텔레그램 4,096자 제한을 넘지 않도록 3,500자 단위 자동 분할.
-- HTML Support: 태그 기반 포맷팅 지원.
-- Error Handling: 네트워크 오류 시 예외 기록 및 Graceful Failure.
-"""
 import requests
 from config.settings import settings
 from utils.logger import setup_custom_logger
@@ -28,22 +21,32 @@ from utils.logger import setup_custom_logger
 logger = setup_custom_logger("Messenger")
 
 class TelegramMessenger:
-    def __init__(self):
-        self.token = settings.TELEGRAM_TOKEN
-        self.chat_id = settings.CHAT_ID
+    def __init__(self, token=None, chat_id=None):
+        """
+        보안 설정을 외부에서 주입(Dependency Injection)받거나, 
+        주입값이 없을 경우 settings.py의 기본 설정을 사용함.
+        """
+        # 1. 우선순위: 주입된 값 > settings.py 설정값
+        self.token = token if token else settings.TELEGRAM_TOKEN
+        self.chat_id = chat_id if chat_id else settings.CHAT_ID
+        
+        # 2. 토큰을 기반으로 API URL 확정
         self.api_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
 
     def send_message(self, text, parse_mode="HTML"):
-        """메시지 발송 (자동 분할 및 HTML 포맷 지원)"""
+        """
+        메시지 발송 (자동 분할 및 HTML 포맷 지원)
+        - David님의 v8.9.7 대량 리포트 전송 규격 준수.
+        """
         if not self.token or not self.chat_id:
-            logger.error("❌ 텔레그램 설정(Token/ID)이 누락되었습니다.")
+            logger.error("❌ 텔레그램 설정(Token/ID)이 누락되어 발송이 불가능합니다.")
             return False
 
         if not text or not text.strip():
             logger.warning("⚠️ 전송할 메시지 내용이 비어 있습니다.")
             return False
 
-        # [David v8.9.7 필수 로직] 메시지 분할 전송 (Chunking)
+        # [v8.9.7 필수 로직] 텔레그램 글자수 제한(4,096자) 방어를 위한 Chunking
         MAX_LEN = 3500
         chunks = [text[i:i + MAX_LEN] for i in range(0, len(text), MAX_LEN)]
         
@@ -57,7 +60,7 @@ class TelegramMessenger:
             }
 
             try:
-                # json=payload를 사용하여 데이터 전송의 안정성 확보
+                # json=payload를 사용하여 데이터 인코딩 안정성 확보
                 response = requests.post(self.api_url, json=payload, timeout=10)
                 response.raise_for_status()
                 logger.info(f"✅ 텔레그램 메시지 발송 성공 (파트 {i+1}/{len(chunks)})")
@@ -67,10 +70,17 @@ class TelegramMessenger:
         
         return success
 
-# 1. 편의를 위한 싱글톤 객체 생성
+# ------------------------------------------------------------
+# 1. 기본 인스턴스 생성 (settings.py 기반 싱글톤)
+# ------------------------------------------------------------
 messenger = TelegramMessenger()
 
-# 2. [핵심] 테스트 코드 및 외부 모듈과의 호환성을 위한 래퍼 함수
+# ------------------------------------------------------------
+# 2. [핵심] 테스트 코드 및 레거시 모듈 호환용 래퍼 함수
+# ------------------------------------------------------------
 def send_telegram(message: str):
-    """테스트 코드(test_messenger.py)에서 호출하는 표준 인터페이스"""
+    """
+    기존 테스트 코드(test_messenger.py) 등에서 
+    객체 생성 없이 즉시 호출할 수 있는 표준 인터페이스.
+    """
     return messenger.send_message(message)

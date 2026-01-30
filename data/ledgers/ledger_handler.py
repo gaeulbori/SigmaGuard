@@ -59,35 +59,41 @@ class LedgerHandler:
         file_path = self._get_file_path(ticker)
         current_level = self._get_level(score)
         
+        # [보정 1] 가격 매핑 로직 강화 (tech_b 참조 오류 수정)
+        current_price_t = tech_t.get('Close') or tech_t.get('price') or 0.0
+        current_price_b = (tech_b.get('Close') or tech_b.get('price') or 0.0) if tech_b else 0.0
+
         row_data = {
             "Audit_Date": market_date,
             "Ticker": ticker,
             "Name": name,
             "Risk_Score": round(score, 1),
             "Risk_Level": current_level,
-            "Price_T": self._format_value(ticker, tech_t['price'], True),
-            "Sigma_T_Avg": round(stat_t['avg_sigma'], 2),
+            "Price_T": self._format_value(ticker, current_price_t, True),
+            "Sigma_T_Avg": round(stat_t.get('avg_sigma', 0), 2),
             "Sigma_T_1y": round(stat_t.get('sig_1y', 0), 2),
             "Sigma_T_2y": round(stat_t.get('sig_2y', 0), 2),
             "Sigma_T_3y": round(stat_t.get('sig_3y', 0), 2),
             "Sigma_T_4y": round(stat_t.get('sig_4y', 0), 2),
             "Sigma_T_5y": round(stat_t.get('sig_5y', 0), 2),
-            "RSI_T": round(tech_t['rsi'], 1),
-            "MFI_T": round(tech_t['mfi'], 1),
-            "BBW_T": round(tech_t.get('bbw', 0), 4),
-            "R2_T": round(tech_t.get('r2', 0), 4),
-            "ADX_T": round(tech_t.get('adx', 0), 1),
-            "Disp_T_120": round(tech_t.get('disp120', 0), 1),
-            "Price_B": self._format_value(ticker, tech_b['price'], True) if tech_b else 0.0,
+            # [보정 2] 지표 대소문자 유연 대응
+            "RSI_T": round(tech_t.get('RSI', tech_t.get('rsi', 0)), 1),
+            "MFI_T": round(tech_t.get('MFI', tech_t.get('mfi', 0)), 1),
+            "BBW_T": round(tech_t.get('bbw', tech_t.get('BBW', 0)), 4),
+            "R2_T": round(tech_t.get('R2', tech_t.get('r2', 0)), 4),
+            "ADX_T": round(tech_t.get('ADX', tech_t.get('adx', 0)), 1),
+            "Disp_T_120": round(tech_t.get('disp120', tech_t.get('Disp120', 0)), 1),
+            "Price_B": self._format_value(ticker, current_price_b, True) if tech_b else 0.0,
             "Sigma_B_Avg": round(stat_b['avg_sigma'], 2) if stat_b else 0.0,
-            "RSI_B": round(tech_b['rsi'], 1) if tech_b else 0.0,
-            "MFI_B": round(tech_b['mfi'], 1) if tech_b else 0.0,
-            "ADX_B": round(tech_b['adx'], 1) if tech_b else 0.0,
-            "BBW_B": round(tech_b.get('bbw', 0), 4) if tech_b else 0.0,
-            "Stop_Price": self._format_value(ticker, alloc['stop_loss'], True),
-            "Risk_Gap_Pct": round(alloc['risk_pct'], 2),
-            "Invest_EI": alloc['ei'],
-            "Weight_Pct": alloc['weight'],
+            # 벤치마크 지표도 안전하게 get 처리
+            "RSI_B": round(tech_b.get('RSI', tech_b.get('rsi', 0)), 1) if tech_b else 0.0,
+            "MFI_B": round(tech_b.get('MFI', tech_b.get('mfi', 0)), 1) if tech_b else 0.0,
+            "ADX_B": round(tech_b.get('ADX', tech_b.get('adx', 0)), 1) if tech_b else 0.0,
+            "BBW_B": round(tech_b.get('bbw', tech_b.get('BBW', 0)), 4) if tech_b else 0.0,
+            "Stop_Price": self._format_value(ticker, alloc.get('stop_loss', 0), True),
+            "Risk_Gap_Pct": round(alloc.get('risk_pct', 0), 2),
+            "Invest_EI": alloc.get('ei', 0),
+            "Weight_Pct": alloc.get('weight', 0),
             "Expected_MDD": bt_res.get('avg_mdd', 0.0),
             "Livermore_Status": liv_status,
             "Base_Raw_Score": details.get('base_raw', 0),
@@ -100,13 +106,13 @@ class LedgerHandler:
 
         if file_path.exists():
             df = pd.read_csv(file_path)
-            # --- [v8.9.7.1 긴급 패치: 데이터 타입 강제 변환] ---
-            # 숫자 데이터가 들어갈 컬럼들을 미리 float로 형변환하여 경고 방지
-            float_cols = [col for col in self.headers if col not in ["Audit_Date", "Ticker", "Name", "Trend_Scenario", "Livermore_Status", "Risk_Level"]]
-            for col in float_cols:
+            
+            # [v9.0.1 긴급 패치] 모든 숫자 컬럼을 float로 강제 변환하여 dtype 충돌 방지
+            numeric_cols = [c for c in self.headers if c not in ["Audit_Date", "Ticker", "Name", "Trend_Scenario", "Livermore_Status"]]
+            for col in numeric_cols:
                 if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
-            # -----------------------------------------------               
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+
             existing_idx = df.index[df['Audit_Date'] == market_date].tolist()
             if existing_idx:
                 idx = existing_idx[0]

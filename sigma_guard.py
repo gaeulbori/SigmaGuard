@@ -23,6 +23,7 @@ from core.sigma_analyzer import SigmaAnalyzer
 from data.ledgers.ledger_handler import LedgerHandler
 from utils.messenger import TelegramMessenger
 from utils.logger import setup_custom_logger
+from utils.visual_reporter import VisualReporter
 from config.settings import settings
 
 logger = setup_custom_logger("SigmaGuard_Main")
@@ -36,6 +37,15 @@ class SigmaGuard:
         self.app_info = self.config_yaml.get('app_info', {})
         self.sys_settings = self.config_yaml.get('settings', {})
         
+        # 2. 로거 먼저 생성 (이 부분이 VisualReporter보다 위에 있어야 합니다!)
+        # 만약 setup_custom_logger를 사용하신다면:
+        from utils.logger import setup_custom_logger
+        self.logger = setup_custom_logger("SigmaGuard_Main") 
+        
+        # 3. 이제 생성된 self.logger를 리포터에 전달
+        from utils.visual_reporter import VisualReporter
+        self.reporter = VisualReporter(self.logger)
+
         # 3. 핵심 엔진 초기화
         self.indicators = Indicators()
         self.risk_engine = RiskEngine()
@@ -48,6 +58,7 @@ class SigmaGuard:
             chat_id=getattr(self.secret_config, "CHAT_ID", None)
         )
         self.analyzer = SigmaAnalyzer(settings.DATA_DIR)
+        self.reporter = VisualReporter(self.logger) # 리포터 임계
 
         logger.info(f"🛡️ {self.app_info.get('version')} {self.app_info.get('edition')} 가동")
         logger.info(f"👤 Auditor: {self.app_info.get('author')} (OCI Ready)")
@@ -139,22 +150,29 @@ class SigmaGuard:
                     name=name,
                     market_date=market_date,
                     latest=latest,
-                    bench_latest=bench_latest,
                     score=score,
                     details=details,
                     alloc=alloc,
-                    bt_res=bt_res
+                    bt_res=bt_res,
+                    bench_latest=bench_latest
                 )
 
-                # 5. 리포트 및 상태 업데이트
                 current_level = self.risk_engine._get_level(score)
                 self.ledger.update_forward_returns(ticker)
                 prev_level, prev_score = self.ledger.get_previous_state(ticker)
 
-                if current_level >= 3 or (prev_score and abs(score - prev_score) >= 3.0):
-                    self.send_report(ticker, name, current_level, score, prev_score, details, bench_ticker)            
+                #if current_level >= 3 or (prev_score and abs(score - prev_score) >= 3.0):
+                #    self.send_report(ticker, name, current_level, score, prev_score, details, bench_ticker)            
                 
-                logger.info(f"✅ [{ticker}] 감사 완료: 현재 Level {current_level} ({score:.1f}점)")
+                #logger.info(f"✅ [{ticker}] 감사 완료: 현재 Level {current_level} ({score:.1f}점)")
+
+                # 5. 리포트 및 상태 업데이트
+                # [Step 5] 신규 리포트 출력 (v9.0.9 규격)
+                # 이제 모든 종목에 대해 이 상세 리포트가 출력됩니다.
+                self.reporter.print_audit_report(
+                    ticker, name, market_date, latest, bench_latest, 
+                    score, prev_score, details, alloc, bt_res
+                )
 
             except Exception as e:
                 logger.error(f"❌ [{ticker}] 감사 중 치명적 오류: {e}")

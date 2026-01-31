@@ -50,8 +50,33 @@ class Indicators:
             logger.error(f"❌ 데이터 로드 오류: {e}")
             return None
 
-    def generate(self, ticker, period="6y"):
-        """[Main Pipeline] 5개년 전수 분석 및 리스크 지표 통합 생성"""
+    """
+    [File Purpose]
+    - v9.0.9: 타겟과 벤치마크의 통합 산출 엔진.
+    - 단일 호출로 (target_df, bench_df) 쌍을 반환하여 데이터 동기화 보장.
+    """
+
+    def generate(self, ticker, period="6y", bench=None):
+        """타겟 종목과 벤치마크 지수의 지표를 동시에 산출"""
+        
+        # 1. 타겟 데이터 산출
+        target_df = self._process_single_ticker(ticker, period)
+        if target_df is None or target_df.empty:
+            return None, None
+
+        # 2. 벤치마크 데이터 산출 (있을 경우만)
+        bench_df = pd.DataFrame()
+        if bench:
+            bench_df = self._process_single_ticker(bench, period)
+            # [v9.0.9 핵심] 타겟 데이터의 날짜 인덱스에 맞춰 벤치마크 데이터 싱크 조절
+            if not bench_df.empty:
+                bench_df = bench_df.reindex(target_df.index).ffill()
+
+        return target_df, bench_df
+
+    def _process_single_ticker(self, ticker, period):
+        """(내부 함수) 개별 티커의 수집 및 지표 가공 로직"""
+        
         df = self.fetch_data(ticker, period=period)
         if df is None or len(df) < self.P_DISP:
             return None
@@ -94,22 +119,43 @@ class Indicators:
 
     # --- [v8.9.7 전용 고도화 메서드] ---
 
-    def calc_multi_sigma(self, df):
-        """다중 기간 시그마 산출 (최소 120일치만 있으면 계산 시작)"""
-        
-        # David님의 시스템 최소 기준인 120일(약 6개월)을 min_periods로 설정합니다.
-        min_obs = 120 
-        
-        # 252일(1년) 단위로 5년치까지 산출
-        df['sig_1y'] = df['Close'].rolling(window=252, min_periods=min_obs).std()
-        df['sig_2y'] = df['Close'].rolling(window=252*2, min_periods=min_obs).std()
-        df['sig_3y'] = df['Close'].rolling(window=252*3, min_periods=min_obs).std()
-        df['sig_4y'] = df['Close'].rolling(window=252*4, min_periods=min_obs).std()
-        df['sig_5y'] = df['Close'].rolling(window=252*5, min_periods=min_obs).std()
+    """
+    [File Purpose]
+    - v9.0.7: 시그마 산출 공식의 Z-Score(표준화) 복구.
+    - David v8.9.7 규격: (현재가 - 평균) / 표준편차
+    - 신생 종목(BAM 등) 대응을 위한 min_periods=120 적용.
+    """
 
-        # 평균 시그마 산출 시에도 NaN을 제외하고 평균을 내도록 수정
+    def calc_multi_sigma(self, df):
+        """
+        [v8.9.7 Logic Restoration]
+        - 절대적 변동폭이 아닌, 평균으로부터의 표준편차 거리를 산출합니다.
+        """
+        # David님의 감사 기준인 Close(또는 price) 확보
+        # (앞선 단계에서 rename을 했다면 'price', 안했다면 'Close'를 사용하세요)
+        target_col = 'Close' if 'Close' in df.columns else 'price'
+        
+        # 최소 분석 관측치 (약 6개월)
+        min_obs = 120 
+
+        # 1. 연도별 Z-Score(Sigma) 산출 루프
+        # 공식: (Price - MA) / Std
+        for y in range(1, 6):
+            window = 252 * y
+            ma = df[target_col].rolling(window=window, min_periods=min_obs).mean()
+            std = df[target_col].rolling(window=window, min_periods=min_obs).std()
+            
+            # v8.9.7 정통 수식 적용
+            df[f'sig_{y}y'] = (df[target_col] - ma) / (std + 1e-10)
+        
+        # 2. 5개년 평균 시그마 산출
+        # 개별 연도 데이터가 부족한 신생 종목은 가용한 연도끼리만 평균을 냅니다.
         sigma_cols = ['sig_1y', 'sig_2y', 'sig_3y', 'sig_4y', 'sig_5y']
         df['avg_sigma'] = df[sigma_cols].mean(axis=1, skipna=True)
+
+        # 3. [추가] 리스크 엔진을 위한 보정
+        # 결과가 NaN인 초기 행들을 제거하기 전에 로그를 남깁니다.
+        logger.info(f"   📊 [Sigma Audit] {target_col} 기반 5개년 다중 시그마 산출 완료")
         
         return df
     

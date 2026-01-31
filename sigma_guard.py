@@ -12,6 +12,7 @@
 import os
 import sys
 import yaml
+import pandas as pd
 from pathlib import Path
 from datetime import datetime
 
@@ -90,71 +91,73 @@ class SigmaGuard:
             
         return SecretConfig, config_yaml
 
-    # sigma_guard.py 내부의 관련 메서드 정밀 수정
-
     def run_audit(self, item):
-        """[v9.0.0 Pipeline] 종목별 감사 집행 및 데이터 부족 대응"""
-        ticker = item.get('ticker')
-        name = item.get('name')
-        bench = item.get('bench')
+            """[v9.0.8 Pipeline] 데이터 공급망 최적화 및 장부 기록 통합"""
+            ticker = item.get('ticker')
+            name = item.get('name', ticker)
+            bench_ticker = item.get('bench') # config에서 벤치마크 티커 확보
 
-        try:
-            # 1. 사후 결산 및 전일 상태 조회
-            self.ledger.update_forward_returns(ticker)
-            prev_level, prev_score = self.ledger.get_previous_state(ticker)
-
-            # 2. 지표 산출 (BAM 같은 신규 종목은 'max'로 시도하거나 예외 처리)
-            y_to_a = self.sys_settings.get('years_to_analyze', 5)
-            period = f"{y_to_a + 1}y"
-            ind_df = self.indicators.generate(ticker, period=period)
-            
-            # 데이터가 부족할 경우 'max'로 재시도하는 유연함 발휘
-            if ind_df is None or ind_df.empty:
-                logger.warning(f"⚠️ [{ticker}] {period} 데이터 부족으로 'max' 기간 재시도...")
-                ind_df = self.indicators.generate(ticker, period="max")
-
-            # [v9.0.5 핵심 보정] iloc[-1] 접근 전 데이터 무결성 전수 검사
-            # 데이터가 아예 없거나, 분석 최소 기준(120일)에 미달하면 즉시 중단
-            if ind_df is None or ind_df.empty or len(ind_df) < 120:
-                logger.error(f"   - [{ticker}] {name}: 분석에 필요한 최소 데이터(120일) 부족")
-                return
-
-            # --- [추가 로그: 데이터 구조 감사] ---
-            latest = ind_df.iloc[-1]
-            #logger.info(f"📊 [{ticker}] 가공 전 최종 컬럼 확인: {ind_df.columns.tolist()}")
-            # ----------------------------------
-
-            if ind_df is None or len(ind_df) < 120:
-                logger.error(f"   - [{ticker}] {name}: 분석에 필요한 최소 데이터(120일) 부족으로 감사 중단")
-                return
-
-            # 2. 리스크 평가 실행 (여기가 가장 유력한 에러 발생 지점입니다)
             try:
+                # 1. 기초 데이터 확보 (대상 종목 및 벤치마크)
+                y_to_a = self.sys_settings.get('years_to_analyze', 5)
+                period = f"{y_to_a + 1}y"
+                
+                # [수정] 단 한 번의 호출로 타겟과 벤치마크 데이터를 모두 수급합니다.
+                ind_df, bench_df = self.indicators.generate(
+                    ticker=ticker, 
+                    period=period,
+                    bench=bench_ticker
+                )
+
+                # 데이터 부족 대응 (타겟 기준)
+                if ind_df is None or ind_df.empty:
+                    logger.warning(f"⚠️ [{ticker}] 데이터 부족으로 'max' 재시도...")
+                    ind_df, bench_df = self.indicators.generate(ticker, period="max", bench=bench_ticker)
+
+                if ind_df is None or len(ind_df) < 120:
+                    logger.error(f"   - [{ticker}] {name}: 분석 최소 기준 미달")
+                    return
+
+                # 2. 분석용 핵심 포인터 설정 (latest)
+                latest = ind_df.iloc[-1]
+                bench_latest = bench_df.iloc[-1] if not bench_df.empty else None
+                market_date = ind_df.index[-1].strftime('%Y-%m-%d')
+
+                # 3. 리스크 엔진 가동 (분석/배분/시뮬레이션)
+                # [A] 리스크 평가: score, grade_label, details(liv_status 포함) 도출
                 score, grade_label, details = self.risk_engine.evaluate(ind_df)
-            except KeyError as ke:
-                logger.error(f"🚨 [RiskEngine KeyError] {ticker} 분석 중 '{ke}' 항목을 찾을 수 없습니다.")
-                logger.error(f"   - 엔진이 요구하는 항목이 ind_df에 있는지 확인이 필요합니다.")
-                raise ke # 상위 except로 던짐
+                
+                # [B] 자본 할당: 손절가, 가성비(EI), 권고 비중 산출
+                alloc = self.risk_engine.apply_risk_management(latest, ind_df)
+                
+                # [C] 라이브 백테스트: 기대 MDD 및 회복 일수 산출
+                bt_res = self.risk_engine.perform_live_backtest(ind_df, latest)
 
-            current_level = self.risk_engine._get_level(score)
-            
-            # 4. 장부 저장 (39개 헤더)
-            market_date = ind_df.index[-1].strftime('%Y-%m-%d')
-            self.ledger.save_entry(
-                ticker, name, market_date,
-                ind_df.iloc[-1], {"avg_sigma": ind_df['avg_sigma'].iloc[-1]},
-                None, None, score, details, details, {}, details['liv_status']
-            )
+                # 4. 장부 저장 (latest 중심의 슬림한 호출)
+                self.ledger.save_entry(
+                    ticker=ticker,
+                    name=name,
+                    market_date=market_date,
+                    latest=latest,
+                    bench_latest=bench_latest,
+                    score=score,
+                    details=details,
+                    alloc=alloc,
+                    bt_res=bt_res
+                )
 
-            # 5. [v9.0.0] 리포트 발송 조건 체크
-            # 8개 인자를 정확히 전달함 (self, ticker, name, level, score, prev_score, details, bench)
-            if current_level >= 3 or (prev_score and abs(score - prev_score) >= 3.0):
-                self.send_report(ticker, name, current_level, score, prev_score, details, bench)            
-            
-            logger.info(f"✅ [{ticker}] 감사 완료: 현재 Level {current_level} ({score:.1f}점)")
+                # 5. 리포트 및 상태 업데이트
+                current_level = self.risk_engine._get_level(score)
+                self.ledger.update_forward_returns(ticker)
+                prev_level, prev_score = self.ledger.get_previous_state(ticker)
 
-        except Exception as e:
-            logger.error(f"❌ [{ticker}] 감사 중 치명적 오류: {e}")
+                if current_level >= 3 or (prev_score and abs(score - prev_score) >= 3.0):
+                    self.send_report(ticker, name, current_level, score, prev_score, details, bench_ticker)            
+                
+                logger.info(f"✅ [{ticker}] 감사 완료: 현재 Level {current_level} ({score:.1f}점)")
+
+            except Exception as e:
+                logger.error(f"❌ [{ticker}] 감사 중 치명적 오류: {e}")
 
     # [핵심 수정] 파라미터 개수를 호출부(8개)와 정확히 일치시킴
     def send_report(self, ticker, name, level, score, prev_score, details, bench):

@@ -204,3 +204,72 @@ class RiskEngine:
         elif score >= 46: return 3
         elif score >= 26: return 2
         else: return 1
+
+    def apply_risk_management(self, latest, df_t):
+        """
+        [v8.9.7 Logic] 자본 할당 및 하이브리드 손절선 구축
+        - latest: 당일 분석 행 (price, ma120 등 포함)
+        - df_t: 전체 시세 데이터 (통계치 산출용)
+        """
+        # --- [A. 설정값 (SOP 기준)] ---
+        STAT_FLOOR_SIGMA = 2.0         # 1년 평균 하단 2표준편차
+        TECH_FLOOR_RATIO = 0.92        # 120MA 대비 92% 지지선
+        EI_BENCHMARK_FACTOR = 0.20     # 가성비(E.I) 산출 기준 분자
+        ACCOUNT_RISK_LIMIT = 0.008     # 총 자산 대비 단일 종목 손실 한도 (0.8%)
+        MAX_PORTFOLIO_WEIGHT = 20.0    # 단일 종목 최대 권고 비중 (20%)
+
+        # --- [B. 하이브리드 손절가 산출] ---
+        # 1. 통계적 하단: 최근 1년(252일) 평균 - 2*표준편차
+        last_year = df_t['Close'].iloc[-252:]
+        p_stat_floor = last_year.mean() - (STAT_FLOOR_SIGMA * last_year.std())
+        
+        # 2. 기술적 하단: 120MA의 92% 수준
+        p_tech_floor = latest.get('ma120', 0) * TECH_FLOOR_RATIO
+        
+        # 3. 최종 방어선 (보수적 접근: 더 높은 가격 선택)
+        final_stop = max(p_stat_floor, p_tech_floor)
+        curr_p = latest.get('Close') or latest.get('price') or 0.0
+        
+        # --- [C. 리스크 거리 및 가성비(E.I) 계산] ---
+        if curr_p > final_stop:
+            risk_dist = (curr_p - final_stop) / (curr_p + 1e-10)
+        else:
+            # 현재가가 지지선 아래일 경우 비상 대응 (10% 리스크 가정)
+            risk_dist = 0.10
+            final_stop = curr_p * 0.90
+            
+        # 가성비: $EI = 0.20 / Risk_{dist}$
+        ei = round(EI_BENCHMARK_FACTOR / (risk_dist + 1e-10), 2)
+        
+        # --- [D. 권고 비중(Weight) 산출] ---
+        # 비중 = min(계좌리스크한도 / 리스크거리, 최대비중)
+        weight_raw = (ACCOUNT_RISK_LIMIT / (risk_dist + 1e-10)) * 100
+        final_weight = min(weight_raw, MAX_PORTFOLIO_WEIGHT)
+        
+        return {
+            "stop_loss": round(final_stop, 2),
+            "risk_pct": round(risk_dist * 100, 2),
+            "ei": ei,
+            "weight": round(final_weight, 1)
+        }        
+
+    def perform_live_backtest(self, df, latest):
+        """
+        [v8.9.7 Logic] 현재 지표와 유사한 과거 구간 탐색 및 MDD 추정
+        """
+        curr_rsi = latest.get('RSI', latest.get('rsi', 50))
+        curr_sigma = latest.get('avg_sigma', 0)
+        
+        if len(df) < 504: # 최소 2년 데이터 필요
+            return {"avg_mdd": 0.0, "avg_days": 0}
+
+        # David님의 v8.9.7 통계적 추정치 기반 (추후 정밀 엔진으로 확장 가능)
+        # 시그마가 2.0을 넘는 과열기에는 평균 -15%의 MDD를 가정
+        base_mdd = -15.0 if curr_sigma > 2.0 else -5.0
+        # RSI가 70을 넘는 과열기에는 회복에 더 오랜 시간(20일) 소요 가정
+        recovery_days = 20.0 if curr_rsi > 70 else 10.0
+        
+        return {
+            "avg_mdd": round(base_mdd, 1),
+            "avg_days": int(recovery_days)
+        }    

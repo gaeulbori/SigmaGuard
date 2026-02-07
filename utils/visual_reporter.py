@@ -271,7 +271,24 @@ class VisualReporter:
             action_brief = str(row.get('action_text', '관망')).split(':')[0]
             action_display = f"{emoji} LEVEL {lvl} - {action_brief}"
 
-            # 최종 라인 조립
+            """
+            [프로그램 상세 설명]
+            1. 하위 버전 호환성(Python 3.8~3.11) 확보: 파이썬 3.12 미만 버전에서 SyntaxError를 유발하는 
+            '중첩 f-string(Nested f-strings)' 구조를 완전히 제거했습니다.
+            2. 변수 사전 할당(Pre-calculation): 가성비(EI)와 비중(Weight) 수치를 f-string 내부에서 직접 
+            계산하지 않고, 사전에 문자열 변수로 생성하여 처리 속도와 안정성을 높였습니다.
+            3. 시각적 정렬 유지: David님의 71개 종목 감사 요약 테이블이 터미널에서 흐트러짐 없이 
+            수직 정렬되도록 패딩(Padding) 로직을 그대로 유지했습니다.
+            """
+
+            # [v9.7.7 Hotfix] 중첩 f-string 방지를 위한 수치 데이터 사전 포맷팅
+            # 1. 가성비(EI) 수치를 소수점 2자리 문자열로 변환
+            ei_formatted = f"{float(row.get('ei', 0)):.2f}"
+            
+            # 2. 권고 비중(Weight)을 소수점 1자리 퍼센트 문자열로 변환
+            weight_formatted = f"{float(row.get('weight', 0)):.1f}%"
+
+            # 3. 최종 라인 조립 (모든 파이썬 버전에서 호환되는 안전한 구조)
             line = (
                 f"{self._pad_visual(i, W['rank'], 'center')} | "
                 f"{self._truncate_and_pad_visual(row.get('name', ticker), W['name'])} | "
@@ -279,10 +296,11 @@ class VisualReporter:
                 f"{self._pad_visual(curr_p, W['price'], 'right')} | "
                 f"{self._pad_visual(score_str, W['score'], 'right')} | "
                 f"{self._truncate_and_pad_visual(action_display, W['action'])} | "
-                f"{self._pad_visual(f"{float(row.get('ei', 0)):.2f}", W['ei'], 'center')} | "
+                f"{self._pad_visual(ei_formatted, W['ei'], 'center')} | "
                 f"{self._pad_visual(stop_p, W['stop'], 'right')} | "
-                f"{self._pad_visual(f"{float(row['weight']):.1f}%", W['weight'], 'right')}"
-            )
+                f"{self._pad_visual(weight_formatted, W['weight'], 'right')}"
+            )            
+            # David님의 OCI 서버 로그에 기록
             self.logger.info(line)
 
         self.logger.info("=" * 165 + "\n")

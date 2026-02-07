@@ -9,6 +9,12 @@
 - KRW/USD Intelligent Formatting: 원화는 정수, 달러는 소수점 3자리로 통화별 맞춤형 기록.
 """
 
+"""
+[File Purpose]
+- v9.5.0: 매크로 지표(VIX, US10Y, DXY) 자동 수집 및 장부 기록 엔진.
+- David님의 v8.9.7 표준 규격에 거시 경제 상황 데이터 3종 추가 통합.
+"""
+
 import os
 import pandas as pd
 import numpy as np
@@ -25,7 +31,7 @@ class LedgerHandler:
         if not self.data_dir.exists():
             self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        # v8.9.7+ 표준 39개 헤더 정의 (성과 분석 컬럼 포함)
+        # v9.5.0 확장 헤더 정의 (매크로 지표 3개 추가: 총 49개 필드)
         self.headers = [
             "Audit_Date", "Ticker", "Name", "Risk_Score", "Risk_Level", "Price_T",
             "Sigma_T_Avg", "Sigma_T_1y", "Sigma_T_2y", "Sigma_T_3y", "Sigma_T_4y", "Sigma_T_5y",
@@ -33,18 +39,47 @@ class LedgerHandler:
             "Price_B", "Sigma_B_Avg", "RSI_B", "MFI_B", "ADX_B", "BBW_B",
             "Stop_Price", "Risk_Gap_Pct", "Invest_EI", "Weight_Pct", "Expected_MDD",
             "Livermore_Status", "Base_Raw_Score", "Risk_Multiplier", "Trend_Scenario",
-            "Score_Pos", "Score_Ene", "Score_Trap",
+            "Score_Pos", "Score_Pos_EMA", # 기존 필드 옆에 EMA 추가
+            "Score_Ene", "Score_Ene_EMA", 
+            "Score_Trap", "Score_Trap_EMA",            
+            # [v9.5.0 매크로 지표 필드]
+            "VIX_T", "US10Y_T", "DXY_T",
+            "MACD_Hist_T", "MACD_Hist_B", "ADX_Gap", "Disp_Limit", "BBW_Thr", "LIV_Discount", "SOP_Action",
             "Ret_20d", "Min_Ret_20d", "Max_Ret_20d"
         ]
+
+    def _get_macro_snapshot(self):
+        macro_tickers = {"^VIX": "VIX_T", "^TNX": "US10Y_T", "DX-Y.NYB": "DXY_T"}
+        results = {"VIX_T": 0.0, "US10Y_T": 0.0, "DXY_T": 0.0}
+        
+        try:
+            # period를 5d로 넉넉히 잡아 주말이나 휴장일 데이터 누락 방지
+            # auto_adjust=True를 명시적으로 추가하여 경고 제거 및 데이터 정합성 유지
+            data = yf.download(list(macro_tickers.keys()), period="5d", progress=False, auto_adjust=True)            
+            if not data.empty:
+                for ticker, field in macro_tickers.items():
+                    # 해당 티커의 마지막 유효한(NaN이 아닌) 값을 추출
+                    valid_series = data['Close'][ticker].dropna()
+                    if not valid_series.empty:
+                        results[field] = round(float(valid_series.iloc[-1]), 2)
+        except Exception as e:
+            logger.warning(f"⚠️ 매크로 데이터 정밀 수집 실패: {e}")
+        
+        return results
 
     def _get_file_path(self, ticker):
         return self.data_dir / f"sigma_guard_ledger_{ticker}.csv"
 
     def _get_level(self, score):
-        if score >= 81: return 5
-        elif score >= 66: return 4
-        elif score >= 46: return 3
-        elif score >= 26: return 2
+        """[v9.7.0 Sync] 리스크 엔진과 동일한 9단계 레벨 적용"""
+        if score >= 91: return 9
+        elif score >= 81: return 8
+        elif score >= 71: return 7
+        elif score >= 61: return 6
+        elif score >= 41: return 5
+        elif score >= 31: return 4
+        elif score >= 21: return 3
+        elif score >= 11: return 2
         else: return 1
 
     def _format_value(self, ticker, value, is_price=False):
@@ -55,21 +90,20 @@ class LedgerHandler:
         return round(float(value), 3)
 
     def save_entry(self, ticker, name, market_date, latest, score, details, alloc, bt_res, bench_latest=None):
-            """
-            [v9.0.8 Refactored] 
-            - 인자 리스트 최적화: latest와 결과 객체 중심으로 슬림화.
-            - 데이터 원천 통합: 모든 기술/통계 지표를 latest 행에서 직접 추출.
-            """
+            """[v9.5.0] 고해상도 장부 기록 (매크로 지표 통합 버전)"""
             file_path = self._get_file_path(ticker)
             current_level = self._get_level(score)
             
-            # 1. 가격 정보 추출 (latest 및 bench_latest 활용)
+            # 1. 시장 환경 매크로 데이터 수집
+            macro_data = self._get_macro_snapshot()
+            
+            # 2. 가격 정보 추출
             current_price_t = latest.get('Close') or latest.get('price') or 0.0
             current_price_b = 0.0
             if bench_latest is not None:
                 current_price_b = bench_latest.get('Close') or bench_latest.get('price') or 0.0
 
-            # 2. 장부 데이터 조립 (Single Source of Truth)
+            # 3. 장부 데이터 조립 (Single Source of Truth)
             row_data = {
                 "Audit_Date": market_date,
                 "Ticker": ticker,
@@ -78,7 +112,6 @@ class LedgerHandler:
                 "Risk_Level": current_level,
                 "Price_T": self._format_value(ticker, current_price_t, True),
                 
-                # [2단계 복구] 시그마 5개년 데이터 (latest에서 직접 get)
                 "Sigma_T_Avg": round(latest.get('avg_sigma', 0), 2),
                 "Sigma_T_1y": round(latest.get('sig_1y', 0), 2),
                 "Sigma_T_2y": round(latest.get('sig_2y', 0), 2),
@@ -86,7 +119,6 @@ class LedgerHandler:
                 "Sigma_T_4y": round(latest.get('sig_4y', 0), 2),
                 "Sigma_T_5y": round(latest.get('sig_5y', 0), 2),
                 
-                # [지표 매핑] 대소문자 구분 없이 최신 행에서 추출
                 "RSI_T": round(latest.get('RSI', latest.get('rsi', 0)), 1),
                 "MFI_T": round(latest.get('MFI', latest.get('mfi', 0)), 1),
                 "BBW_T": round(latest.get('bbw', latest.get('BBW', 0)), 4),
@@ -94,33 +126,48 @@ class LedgerHandler:
                 "ADX_T": round(latest.get('ADX', latest.get('adx', 0)), 1),
                 "Disp_T_120": round(latest.get('disp120', latest.get('Disp120', 0)), 1),
                 
-                # [벤치마크 데이터] bench_latest가 전달된 경우만 처리
                 "Price_B": self._format_value(ticker, current_price_b, True),
                 "Sigma_B_Avg": round(bench_latest.get('avg_sigma', 0), 2) if bench_latest is not None else 0.0,
                 "RSI_B": round(bench_latest.get('RSI', bench_latest.get('rsi', 0)), 1) if bench_latest is not None else 0.0,
                 "MFI_B": round(bench_latest.get('MFI', bench_latest.get('mfi', 0)), 1) if bench_latest is not None else 0.0,
                 "ADX_B": round(bench_latest.get('ADX', bench_latest.get('adx', 0)), 1) if bench_latest is not None else 0.0,
-                "BBW_B": round(bench_latest.get('bbw', latest.get('BBW', 0)), 4) if bench_latest is not None else 0.0,
+                "BBW_B": round(bench_latest.get('bbw', 0), 4) if bench_latest is not None else 0.0,
                 
-                # [전략/결산 데이터]
                 "Stop_Price": self._format_value(ticker, alloc.get('stop_loss', 0), True),
                 "Risk_Gap_Pct": round(alloc.get('risk_pct', 0), 2),
                 "Invest_EI": alloc.get('ei', 0),
                 "Weight_Pct": alloc.get('weight', 0),
                 "Expected_MDD": bt_res.get('avg_mdd', 0.0),
-                "Livermore_Status": details.get('liv_status', 'N/A'), # [Phase 3] 상세 메시지 매핑
+                "Livermore_Status": details.get('liv_status', 'N/A'),
                 "Base_Raw_Score": details.get('base_raw', 0),
                 "Risk_Multiplier": details.get('multiplier', 1.0),
                 "Trend_Scenario": details.get('scenario', 'N/A'),
                 "Score_Pos": details.get('p1', 0),
+                "Score_Pos_EMA": details.get('p1_ema'),  # EMA 기록
                 "Score_Ene": details.get('p2', 0),
-                "Score_Trap": details.get('p4', 0)
+                "Score_Ene_EMA": details.get('p2_ema'),  # EMA 기록
+                "Score_Trap": details.get('p4', 0),
+                "Score_Trap_EMA": details.get('p4_ema'),  # EMA 기록
+
+                # [v9.5.0 신규 매크로 필드 매핑]
+                "VIX_T": macro_data["VIX_T"],
+                "US10Y_T": macro_data["US10Y_T"],
+                "DXY_T": macro_data["DXY_T"],
+
+                "MACD_Hist_T": round(details.get('macd_h', 0.0), 4),
+                "MACD_Hist_B": round(details.get('bench_macd_h', 0.0), 4),
+                "ADX_Gap": round(details.get('discrepancy', 0.0), 1),
+                "Disp_Limit": round(latest.get('disp120_limit', 0.0), 1),
+                "BBW_Thr": round(latest.get('bbw_thr', 0.3), 4),
+                "LIV_Discount": round(details.get('liv_discount', 0.0), 2),
+                "SOP_Action": details.get('action', 'N/A')
             }
 
-            # 3. 파일 저장 로직 (기존 무결성 패치 유지)
+            # 4. 파일 저장 로직 (기존 무결성 패치 유지)
             if file_path.exists():
                 df = pd.read_csv(file_path)
-                numeric_cols = [c for c in self.headers if c not in ["Audit_Date", "Ticker", "Name", "Trend_Scenario", "Livermore_Status"]]
+                exclude_cols = ["Audit_Date", "Ticker", "Name", "Trend_Scenario", "Livermore_Status", "SOP_Action"]
+                numeric_cols = [c for c in self.headers if c not in exclude_cols]
                 for col in numeric_cols:
                     if col in df.columns:
                         df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -136,7 +183,8 @@ class LedgerHandler:
                 df = pd.DataFrame([row_data]).reindex(columns=self.headers)
 
             df.to_csv(file_path, index=False, encoding='utf-8-sig')
-            logger.info(f"💾 [{ticker}] 장부 기록 완료: {market_date}")
+
+    # ... (update_forward_returns, get_previous_state 등 기존 메서드 유지)
 
     def update_forward_returns(self, ticker):
         """[Phase 3] 사후 성과 결산: 감사 20일 후의 실제 수익률 추적 및 기록"""
@@ -197,3 +245,21 @@ class LedgerHandler:
         except Exception as e:
             logger.error(f"⚠️ [{ticker}] 과거 장부 분석 실패: {e}")
             return None, None
+
+    def get_previous_sub_scores(self, ticker):
+        """[v9.6.8] 직전 거래일의 세부 EMA 점수를 호출하여 평활화 기초값 제공"""
+        file_path = self._get_file_path(ticker)
+        if not file_path.exists(): return None
+        try:
+            df = pd.read_csv(file_path)
+            if df.empty: return None
+            # 오늘 기록을 제외한 최신 행 추출
+            past_df = df[df['Audit_Date'] != datetime.now().strftime("%Y-%m-%d")]
+            if past_df.empty: return None
+            last = past_df.iloc[-1]
+            return {
+                'p1_ema': last.get('Score_Pos_EMA', last.get('Score_Pos', 0)),
+                'p2_ema': last.get('Score_Ene_EMA', last.get('Score_Ene', 0)),
+                'p4_ema': last.get('Score_Trap_EMA', last.get('Score_Trap', 0))
+            }
+        except Exception: return None        

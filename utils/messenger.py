@@ -69,6 +69,38 @@ class TelegramMessenger:
                 success = False
         
         return success
+    
+    def send_smart_message(self, message):
+        """[v9.9.9] 대량 종목 대응형 스마트 분할 전송"""
+        if not message.strip(): return
+        
+        MAX_LEN = 3500 # 텔레그램 안전 여유분 포함
+        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+
+        # 1. 메시지 분할 로직 (기존 v8.9.1 이식)
+        chunks = []
+        if len(message) <= MAX_LEN:
+            chunks = [message]
+        else:
+            current_chunk = ""
+            parts = [p.strip() for p in message.split('\n\n') if p.strip()]
+            for part in parts:
+                if len(current_chunk) + len(part) + 2 <= MAX_LEN:
+                    current_chunk += part + '\n\n'
+                else:
+                    chunks.append(current_chunk.strip())
+                    current_chunk = part + '\n\n'
+            if current_chunk: chunks.append(current_chunk.strip())
+
+        # 2. 각 청크 전송
+        for chunk in chunks:
+            payload = {
+                "chat_id": self.chat_id,
+                "text": chunk,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True
+            }
+            requests.post(url, json=payload, timeout=15)    
 
 # ------------------------------------------------------------
 # 1. 기본 인스턴스 생성 (settings.py 기반 싱글톤)

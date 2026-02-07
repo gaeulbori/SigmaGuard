@@ -34,7 +34,7 @@ class Indicators:
     def fetch_data(self, ticker, period="6y"):
         """[v8.9.7] 5년 통계 확보를 위한 6년치 데이터 로드"""
         try:
-            logger.info(f"📥 [{ticker}] 시세 데이터 로드 중... (기간: {period})")
+            #logger.info(f"📥 [{ticker}] 시세 데이터 로드 중... (기간: {period})")
             # auto_adjust=True로 수정하여 yfinance 경고 방지 및 실질 가격 반영
             df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
             
@@ -103,7 +103,7 @@ class Indicators:
         df['slope'] = self.calc_relative_slope(df, self.P_R2)
         
         # 5. 리스크 엔진 연동용 트렌드 지표
-        df['m_trend'] = self.calc_macd_trend(df)
+        df['macd_h'], df['m_trend'] = self.calc_macd_trend(df)
         df['ma_slope'] = np.where(
             df['Close'].rolling(self.P_DISP).mean() > df['Close'].rolling(self.P_DISP).mean().shift(5), 
             "Rising", "Falling"
@@ -155,7 +155,7 @@ class Indicators:
 
         # 3. [추가] 리스크 엔진을 위한 보정
         # 결과가 NaN인 초기 행들을 제거하기 전에 로그를 남깁니다.
-        logger.info(f"   📊 [Sigma Audit] {target_col} 기반 5개년 다중 시그마 산출 완료")
+        #logger.info(f"   📊 [Sigma Audit] {target_col} 기반 5개년 다중 시그마 산출 완료")
         
         return df
     
@@ -247,4 +247,4 @@ class Indicators:
         signal = macd.ewm(span=9, adjust=False).mean()
         hist = macd - signal
         res = np.where(hist > hist.shift(1), "상승가속", "감속")
-        return pd.Series(res, index=df.index)
+        return hist, pd.Series(res, index=df.index)

@@ -46,7 +46,13 @@ class RiskEngine:
                 return 0.0, "NODATA", {}
 
             latest = ind_df.iloc[-1]
-            has_bench = bench_df is not None and not bench_df.empty
+
+            # [개선] 더 안전한 벤치마크 유무 체크 (isinstance 검증 포함)
+            has_bench = False
+            if bench_df is not None:
+                if isinstance(bench_df, pd.DataFrame) and not bench_df.empty:
+                    has_bench = True
+            
             b_latest = bench_df.iloc[-1] if has_bench else None
             
             # 1. 부문별 기초 점수 산출

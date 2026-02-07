@@ -110,7 +110,7 @@ class SigmaGuard:
 
         try:
             # [수정] 매크로 데이터를 먼저 수집하여 details에 병합
-            macro_data = self.ledger._get_macro_snapshot()            
+            macro_data = self.ledger._get_macro_snapshot() or {}           
             # 1. 기초 데이터 확보 (대상 종목 및 벤치마크)
             # 1. 분석 전 기초 잔액(Prev EMA) 및 매크로 상황 확보
             prev_ema = self.ledger.get_previous_sub_scores(ticker)
@@ -134,9 +134,17 @@ class SigmaGuard:
                 logger.error(f"   - [{ticker}] {name}: 분석 최소 기준 미달")
                 return
 
+            has_bench = False
+            if bench_df is not None:
+                try:
+                    # bench_df가 DataFrame인지와 데이터가 있는지 동시에 검증
+                    if isinstance(bench_df, pd.DataFrame) and not bench_df.empty:
+                        has_bench = True
+                except:
+                    has_bench = False
             # 2. 분석용 핵심 포인터 설정 (latest)
             latest = ind_df.iloc[-1]
-            bench_latest = bench_df.iloc[-1] if (bench_df is not None and not bench_df.empty) else None
+            bench_latest = bench_df.iloc[-1] if has_bench else None
             market_date = ind_df.index[-1].strftime('%Y-%m-%d')
 
             # 3. 리스크 엔진 가동 (분석/배분/시뮬레이션)

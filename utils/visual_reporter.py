@@ -279,9 +279,9 @@ class VisualReporter:
                 f"{self._pad_visual(curr_p, W['price'], 'right')} | "
                 f"{self._pad_visual(score_str, W['score'], 'right')} | "
                 f"{self._truncate_and_pad_visual(action_display, W['action'])} | "
-                f"{self._pad_visual(f'{float(row.get('ei', 0)):.2f}', W['ei'], 'center')} | "
+                f"{self._pad_visual(f"{float(row.get('ei', 0)):.2f}", W['ei'], 'center')} | "
                 f"{self._pad_visual(stop_p, W['stop'], 'right')} | "
-                f"{self._pad_visual(f'{float(row['weight']):.1f}%', W['weight'], 'right')}"
+                f"{self._pad_visual(f"{float(row['weight']):.1f}%", W['weight'], 'right')}"
             )
             self.logger.info(line)
 

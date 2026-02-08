@@ -36,6 +36,7 @@ class LedgerHandler:
             "Audit_Date", "Ticker", "Name", "Risk_Score", "Risk_Level", "Price_T",
             "Sigma_T_Avg", "Sigma_T_1y", "Sigma_T_2y", "Sigma_T_3y", "Sigma_T_4y", "Sigma_T_5y",
             "RSI_T", "MFI_T", "BBW_T", "R2_T", "ADX_T", "Disp_T_120",
+            "Ticker_B",
             "Price_B", "Sigma_B_Avg", "RSI_B", "MFI_B", "ADX_B", "BBW_B",
             "Stop_Price", "Risk_Gap_Pct", "Invest_EI", "Weight_Pct", "Expected_MDD",
             "Livermore_Status", "Base_Raw_Score", "Risk_Multiplier", "Trend_Scenario",
@@ -89,7 +90,7 @@ class LedgerHandler:
             return int(round(float(value), 0))
         return round(float(value), 3)
 
-    def save_entry(self, ticker, name, market_date, latest, score, details, alloc, bt_res, bench_latest=None):
+    def save_entry(self, ticker, name, market_date, latest, score, details, alloc, bt_res, bench_latest=None, bench_ticker='N/A'):
             """[v9.5.0] 고해상도 장부 기록 (매크로 지표 통합 버전)"""
             file_path = self._get_file_path(ticker)
             current_level = self._get_level(score)
@@ -125,7 +126,7 @@ class LedgerHandler:
                 "R2_T": round(latest.get('R2', latest.get('r2', 0)), 4),
                 "ADX_T": round(latest.get('ADX', latest.get('adx', 0)), 1),
                 "Disp_T_120": round(latest.get('disp120', latest.get('Disp120', 0)), 1),
-                
+                "Ticker_B": bench_ticker,
                 "Price_B": self._format_value(ticker, current_price_b, True),
                 "Sigma_B_Avg": round(bench_latest.get('avg_sigma', 0), 2) if bench_latest is not None else 0.0,
                 "RSI_B": round(bench_latest.get('RSI', bench_latest.get('rsi', 0)), 1) if bench_latest is not None else 0.0,

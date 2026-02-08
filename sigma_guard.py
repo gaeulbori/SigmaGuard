@@ -181,7 +181,8 @@ class SigmaGuard:
                 details=details,
                 alloc=alloc,
                 bt_res=bt_res,
-                bench_latest=bench_latest
+                bench_latest=bench_latest,
+                bench_ticker=bench_ticker
             )
 
             current_level = self.risk_engine._get_level(score)

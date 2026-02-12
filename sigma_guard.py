@@ -262,7 +262,9 @@ class SigmaGuard:
                     if prev_score is None: new_stocks.append(msg)
                     elif audit_data['score'] > prev_score: risk_up.append(msg)
                     else: risk_down.append(msg)                    
-        
+        # [추가 로그] 분류 결과 출력
+        self.logger.info(f"📊 [메시지 분류 결과] 신규: {len(new_stocks)}, 상승: {len(risk_up)}, 하락: {len(risk_down)}")
+
         # 1. 터미널 요약 출력
         self.reporter.print_audit_summary_table(audit_results_summary)
         # 2. [v9.9.9 추가] 텔레그램 통합 알림 발송
@@ -274,12 +276,16 @@ class SigmaGuard:
         delta_body = self.reporter.assemble_delta_alerts(new_stocks, risk_up, risk_down)
         
         if is_weekly_day:
+            self.logger.info("📅 오늘은 주간 리포트 발송일입니다.")
             weekly_msg = self.reporter.build_weekly_dashboard(audit_results_summary)
             final_msg = (delta_body + "\n" + weekly_msg) if delta_body else weekly_msg
         else:
             final_msg = delta_body # 평일엔 변동 사항만 전송
+            if not final_msg:
+                self.logger.warning("🔔 [알림] 리스크 점수 변동이 없어 전송할 메시지가 생성되지 않았습니다.")            
 
         if final_msg:
+            self.logger.info(f"🚀 텔레그램 메시지 전송 시도 (크기: {len(final_msg)} bytes)")            
             # 텔레그램 스마트 분할 전송
             self.messenger.send_smart_message(final_msg)
         

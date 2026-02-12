@@ -83,12 +83,47 @@ class LedgerHandler:
         elif score >= 11: return 2
         else: return 1
 
-    def _format_value(self, ticker, value, is_price=False):
-        if value is None or pd.isna(value): return 0.0
+    def _format_value(self, ticker, value, category="normal"):
+        """
+        [David's Refined Standard] 
+        데이터의 성격(category)에 따라 자릿수 정밀도를 제어합니다.
+        """
+        if value is None or pd.isna(value): 
+            return 0.0
+        
+        try:
+            val = float(value)
+        except (ValueError, TypeError):
+            return value # 숫자가 아닌 경우 그대로 반환
+
         is_krw = any(s in ticker for s in ['.KS', '.KQ'])
-        if is_price and is_krw:
-            return int(round(float(value), 0))
-        return round(float(value), 3)
+
+        # 1. 가격 (KRW: 정수, USD: 3자리)
+        if category == "price":
+            return int(round(val, 0)) if is_krw else round(val, 3)
+        
+        # 2. 리스크 점수 (1자리)
+        elif category == "score":
+            return round(val, 1)
+        
+        # 3. 시그마 지표 (3자리)
+        elif category == "sigma":
+            return round(val, 3)
+        
+        # 4. 주요 기술 지표 (RSI, MFI, ADX, Disp - 1자리)
+        elif category in ["indicator", "disparity"]:
+            return round(val, 1)
+        
+        # 5. 수학적 변동성 및 추세 (R2, BBW, MACD_Hist - 4자리)
+        elif category in ["math", "oscillator"]:
+            return round(val, 4)
+        
+        # 6. 매크로 및 수익률 (VIX, 금리, Ret_20d - 2자리)
+        elif category in ["macro", "return"]:
+            return round(val, 2)
+        
+        # 7. 기본값 (3자리)
+        return round(val, 3)
 
     def save_entry(self, ticker, name, market_date, latest, score, details, alloc, bt_res, bench_latest=None, bench_ticker='N/A'):
             """[v9.5.0] 고해상도 장부 기록 (매크로 지표 통합 버전)"""

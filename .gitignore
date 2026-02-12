@@ -14,6 +14,8 @@ logs/*.log
 *.log.*
 data/ledgers/*.csv
 data/portfolio/*.json
+tests/data
+tests/logs
 
 # OS files
 .DS_Store

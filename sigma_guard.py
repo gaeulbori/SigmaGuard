@@ -102,30 +102,16 @@ class SigmaGuard:
             
         return SecretConfig, config_yaml
 
-    def run_audit(self, item):
+    def run_audit(self, item, macro_snapshot):
         """[v9.2.0 Integration] 데이터 공급망 최적화 및 고해상도 리포트 대응"""
         ticker = item.get('ticker')
         name = item.get('name', ticker)
         bench_ticker = item.get('bench', 'N/A') # config에서 벤치마크 티커 확보
 
         try:
-            # [수정] 매크로 데이터를 먼저 수집하여 details에 병합
-            macro_data = self.ledger._get_macro_snapshot() or {}           
-            # 1. 기초 데이터 확보 (대상 종목 및 벤치마크)
-            # 1. 분석 전 기초 잔액(Prev EMA) 및 매크로 상황 확보
-            prev_ema = self.ledger.get_previous_sub_scores(ticker)
-
             y_to_a = self.sys_settings.get('years_to_analyze', 5)
             period = f"{y_to_a + 1}y"
-            
-            # [최적화] 타겟과 벤치마크 데이터를 동시에 수급
-            ind_df, bench_df = self.indicators.generate(
-                ticker=ticker, 
-                period=period,
-                bench=bench_ticker
-            )
-
-            # 데이터 부족 대응 (타겟 기준)
+            ind_df, bench_df = self.indicators.generate(ticker=ticker, period=period, bench=bench_ticker)
             if ind_df is None or ind_df.empty:
                 logger.warning(f"⚠️ [{ticker}] 데이터 부족으로 'max' 재시도...")
                 ind_df, bench_df = self.indicators.generate(ticker, period="max", bench=bench_ticker)
@@ -133,6 +119,13 @@ class SigmaGuard:
             if ind_df is None or len(ind_df) < 120:
                 logger.error(f"   - [{ticker}] {name}: 분석 최소 기준 미달")
                 return
+
+            latest = ind_df.iloc[-1]
+            market_date = ind_df.index[-1].strftime('%Y-%m-%d')
+
+            # 2. [핵심 수정] 오늘 날짜(market_date)를 기준으로 '진짜 과거' 점수를 가져옴
+            prev_level, prev_score = self.ledger.get_previous_state(ticker, market_date)            
+            prev_ema = self.ledger.get_previous_sub_scores(ticker, market_date) # 내부 로직 동일하게 수정 필요
 
             has_bench = False
             if bench_df is not None:
@@ -142,10 +135,9 @@ class SigmaGuard:
                         has_bench = True
                 except:
                     has_bench = False
+
             # 2. 분석용 핵심 포인터 설정 (latest)
-            latest = ind_df.iloc[-1]
             bench_latest = bench_df.iloc[-1] if has_bench else None
-            market_date = ind_df.index[-1].strftime('%Y-%m-%d')
 
             # 3. 리스크 엔진 가동 (분석/배분/시뮬레이션)
             # ---------------------------------------------------------
@@ -154,15 +146,12 @@ class SigmaGuard:
             # 2. 리스크 엔진 가동 (과거 EMA 주입)
             score, grade_label, details = self.risk_engine.evaluate(ind_df, bench_df, prev_ema)            
             
-            # 리포트 출력 시 이름(Name)을 사용하기 위해 details에 주입
-            details['name'] = name
-
-            # [핵심] 수집된 매크로와 리포트용 라벨을 details에 주입
             details.update({
-                'vix': macro_data.get('VIX_T'),
-                'dxy': macro_data.get('DXY_T'),
-                'us10y': macro_data.get('US10Y_T'),
-                'action_label': grade_label  # 'DANGER' 등이 리포트 상단에 찍힘
+                'name': name,
+                'vix': macro_snapshot.get('VIX_T'),
+                'dxy': macro_snapshot.get('DXY_T'),
+                'us10y': macro_snapshot.get('US10Y_T'),
+                'action_label': grade_label
             })
 
             # [B] 자본 할당: 손절가, 가성비(EI), 권고 비중 산출
@@ -173,21 +162,13 @@ class SigmaGuard:
 
             # 4. 장부 저장 (latest 중심의 슬림한 호출)
             self.ledger.save_entry(
-                ticker=ticker,
-                name=name,
-                market_date=market_date,
-                latest=latest,
-                score=score,
-                details=details,
-                alloc=alloc,
-                bt_res=bt_res,
-                bench_latest=bench_latest,
+                ticker=ticker, name=name, market_date=market_date,
+                latest=latest, score=score, details=details,
+                alloc=alloc, bt_res=bt_res, macro_data=macro_snapshot,
+                bench_latest=bench_df.iloc[-1] if bench_df is not None else None,
                 bench_ticker=bench_ticker
             )
-
-            current_level = self.risk_engine._get_level(score)
             self.ledger.update_forward_returns(ticker)
-            prev_level, prev_score = self.ledger.get_previous_state(ticker)
 
             # 5. [수정] 고해상도 리포트 출력 (v9.2.0 규격)
             # ---------------------------------------------------------
@@ -249,26 +230,25 @@ class SigmaGuard:
         audit_results_summary = []
         # [핵심] 변화 감지를 위한 카테고리 바구니
         new_stocks, risk_up, risk_down = [], [], []
-        alert_messages = [] # [추가] 알림 메시지 보관함
+            # 2. 기초 데이터 및 매크로 확보
+        macro_snapshot = self.ledger._get_macro_snapshot() or {}           
 
         for item in watchlist:
-            audit_data = self.run_audit(item)
+            audit_data = self.run_audit(item, macro_snapshot)
             if audit_data:
                 audit_results_summary.append(audit_data)
-                # [v9.9.9 추가] 델타 알림 생성 및 취합
                 msg = self.reporter.build_delta_alert_msg(audit_data)
                 if msg:
                     prev_score = audit_data.get('prev_score')
                     if prev_score is None: new_stocks.append(msg)
                     elif audit_data['score'] > prev_score: risk_up.append(msg)
-                    else: risk_down.append(msg)                    
+                    elif audit_data['score'] < prev_score: risk_down.append(msg)
+
         # [추가 로그] 분류 결과 출력
         self.logger.info(f"📊 [메시지 분류 결과] 신규: {len(new_stocks)}, 상승: {len(risk_up)}, 하락: {len(risk_down)}")
 
         # 1. 터미널 요약 출력
         self.reporter.print_audit_summary_table(audit_results_summary)
-        # 2. [v9.9.9 추가] 텔레그램 통합 알림 발송
-        # 2. 요일별 알림 발송 전략 (v8.9.7 이식)
         now = datetime.now()
         WEEKLY_REPORT_DAY = 5 # 토요일 (David 설정값)
         is_weekly_day = (now.weekday() == WEEKLY_REPORT_DAY)
@@ -280,15 +260,25 @@ class SigmaGuard:
             weekly_msg = self.reporter.build_weekly_dashboard(audit_results_summary)
             final_msg = (delta_body + "\n" + weekly_msg) if delta_body else weekly_msg
         else:
-            final_msg = delta_body # 평일엔 변동 사항만 전송
-            if not final_msg:
-                self.logger.warning("🔔 [알림] 리스크 점수 변동이 없어 전송할 메시지가 생성되지 않았습니다.")            
+            if delta_body:
+                final_msg = delta_body
+            else:
+                # [David님을 위한 Heartbeat 추가] 변동이 없을 때 발송할 메시지
+                self.logger.info("🔔 변동 사항 없음: 생존 신고 메시지 생성")
+                total = len(audit_results_summary)
+                final_msg = (
+                    f"🛡️ <b>Sigma Guard Status: NORMAL</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"현재 전일 대비 리스크 점수 변동이 있는 종목이 없습니다.\n"
+                    f"• 감시 대상: {total}개 종목\n"
+                    f"• 장부 기록: 정상 업데이트 완료\n"
+                    f"• 분석 시간: {now.strftime('%H:%M')} (KST)\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"안심하고 일과를 보내시기 바랍니다, David님."
+                )
 
         if final_msg:
-            self.logger.info(f"🚀 텔레그램 메시지 전송 시도 (크기: {len(final_msg)} bytes)")            
-            # 텔레그램 스마트 분할 전송
             self.messenger.send_smart_message(final_msg)
-        
 
     """
     [Program Explanation]

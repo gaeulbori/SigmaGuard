@@ -162,19 +162,18 @@ class VisualReporter:
         self.logger.info(self.double_line + "\n")
 
     def print_audit_summary_table(self, audit_results):
-        """[v9.8.8 Fix] 한글/영문 혼용 환경에서의 세로 칼럼 폭 완벽 정렬"""
+        """[v9.8.8 Fix] 구문 오류 해결 및 세로 칼럼 폭 완벽 정렬"""
         if not audit_results:
             self.logger.warning("📊 요약할 감사 결과가 없습니다."); return
 
         df = pd.DataFrame(audit_results).sort_values(by='score', ascending=False)
         
-        # [CPA 정밀 규격] 각 칼럼의 고정 너비 설정 (합계 약 145자)
+        # [CPA 정밀 규격] 각 칼럼의 고정 너비 설정
         W = {
             'rank': 4, 'name': 20, 'ticker': 12, 'price': 15,
             'score': 18, 'action': 32, 'ei': 8, 'stop': 15, 'weight': 10
         }
 
-        # 전체 구분선 생성
         total_width = sum(W.values()) + (len(W) - 1) * 3 + 2
         line_sep = "-" * total_width
         double_sep = "=" * total_width
@@ -183,7 +182,7 @@ class VisualReporter:
         self.logger.info(f" 📑 [TOTAL AUDIT SUMMARY] 총 {len(df)}개 종목 전수 감사 결과 요약")
         self.logger.info(line_sep)
         
-        # 1. 헤더 출력 (시각적 폭 계산 적용)
+        # 헤더 조립
         header = (
             f" {self._pad_visual('Rank', W['rank'], 'center')} | "
             f"{self._pad_visual('Name', W['name'], 'left')} | "
@@ -198,13 +197,12 @@ class VisualReporter:
         self.logger.info(header)
         self.logger.info(line_sep)
 
-        # 2. 데이터 로우 출력
         for i, (_, row) in enumerate(df.iterrows(), 1):
             ticker = str(row['ticker'])
             p_str = self._fmt_money(row.get('price', 0), ticker)
             s_str = self._fmt_money(row.get('stop', 0), ticker)
             
-            # 리스크 및 델타 계산
+            # [수정] 복잡한 f-string 연산을 변수로 분리 (SyntaxError 방지)
             score, p_score = float(row['score']), row.get('prev_score')
             if p_score is not None and not pd.isna(p_score):
                 delta = score - float(p_score)
@@ -214,10 +212,13 @@ class VisualReporter:
             
             score_display = f"{score:.1f} ({delta_str})"
             
-            # Action 메시지 최적화 (이모지 포함)
+            # 수치 데이터 포맷팅
+            ei_val = f"{float(row.get('ei', 0)):.2f}"
+            weight_val = f"{float(row.get('weight', 0)):.1f}%"
+            
+            # Action 메시지 최적화
             lvl = self._get_lvl(score)
             emoji = self._get_label_with_emoji(lvl).split()[0]
-            # 지침 텍스트가 너무 길면 잘라서 정렬 유지
             action_raw = str(row.get('action_text', 'N/A')).split(':')[0]
             action_display = f"{emoji} LV.{lvl} {action_raw}"
 
@@ -229,9 +230,9 @@ class VisualReporter:
                 f"{self._pad_visual(p_str, W['price'], 'right')} | "
                 f"{self._pad_visual(score_display, W['score'], 'right')} | "
                 f"{self._truncate_and_pad_visual(action_display, W['action'])} | "
-                f"{self._pad_visual(f'{float(row.get('ei', 0)):.2f}', W['ei'], 'center')} | "
+                f"{self._pad_visual(ei_val, W['ei'], 'center')} | "
                 f"{self._pad_visual(s_str, W['stop'], 'right')} | "
-                f"{self._pad_visual(f'{float(row.get('weight', 0)):.1f}%', W['weight'], 'right')}"
+                f"{self._pad_visual(weight_val, W['weight'], 'right')}"
             )            
             self.logger.info(line)
 

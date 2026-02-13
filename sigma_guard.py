@@ -103,47 +103,38 @@ class SigmaGuard:
         return SecretConfig, config_yaml
 
     def run_audit(self, item, macro_snapshot):
-        """[v9.2.0 Integration] 데이터 공급망 최적화 및 고해상도 리포트 대응"""
+        """[v9.8.9 Fix] 벤치마크 빈 데이터셋 접근 오류(Out-of-Bounds) 완전 방어"""
         ticker = item.get('ticker')
         name = item.get('name', ticker)
-        bench_ticker = item.get('bench', 'N/A') # config에서 벤치마크 티커 확보
+        bench_ticker = item.get('bench', 'N/A')
 
         try:
+            # 1. 데이터 수급 및 기초 검증
             y_to_a = self.sys_settings.get('years_to_analyze', 5)
             period = f"{y_to_a + 1}y"
             ind_df, bench_df = self.indicators.generate(ticker=ticker, period=period, bench=bench_ticker)
+            
             if ind_df is None or ind_df.empty:
                 logger.warning(f"⚠️ [{ticker}] 데이터 부족으로 'max' 재시도...")
                 ind_df, bench_df = self.indicators.generate(ticker, period="max", bench=bench_ticker)
 
             if ind_df is None or len(ind_df) < 120:
                 logger.error(f"   - [{ticker}] {name}: 분석 최소 기준 미달")
-                return
+                return None
 
             latest = ind_df.iloc[-1]
             market_date = ind_df.index[-1].strftime('%Y-%m-%d')
 
-            # 2. [핵심 수정] 오늘 날짜(market_date)를 기준으로 '진짜 과거' 점수를 가져옴
+            # 2. 과거 데이터 복원
             prev_level, prev_score = self.ledger.get_previous_state(ticker, market_date)            
-            prev_ema = self.ledger.get_previous_sub_scores(ticker, market_date) # 내부 로직 동일하게 수정 필요
+            prev_ema = self.ledger.get_previous_sub_scores(ticker, market_date)
 
-            has_bench = False
-            if bench_df is not None:
-                try:
-                    # bench_df가 DataFrame인지와 데이터가 있는지 동시에 검증
-                    if isinstance(bench_df, pd.DataFrame) and not bench_df.empty:
-                        has_bench = True
-                except:
-                    has_bench = False
+            # 3. [핵심 에러 방어] 벤치마크 유효성 정밀 검증
+            # bench_df가 None이 아니고, 데이터가 1건이라도 있어야 iloc[-1]을 허용합니다.
+            is_bench_valid = isinstance(bench_df, pd.DataFrame) and not bench_df.empty
+            bench_latest = bench_df.iloc[-1] if is_bench_valid else None
 
-            # 2. 분석용 핵심 포인터 설정 (latest)
-            bench_latest = bench_df.iloc[-1] if has_bench else None
-
-            # 3. 리스크 엔진 가동 (분석/배분/시뮬레이션)
-            # ---------------------------------------------------------
-            # [A] [수정] 리스크 평가: 이제 bench_df를 함께 전달하여 괴리도를 분석합니다.
-            # ---------------------------------------------------------
-            # 2. 리스크 엔진 가동 (과거 EMA 주입)
+            # 4. 리스크 엔진 가동
             score, grade_label, details = self.risk_engine.evaluate(ind_df, bench_df, prev_ema)            
             
             details.update({
@@ -154,47 +145,44 @@ class SigmaGuard:
                 'action_label': grade_label
             })
 
-            # [B] 자본 할당: 손절가, 가성비(EI), 권고 비중 산출
             alloc = self.risk_engine.apply_risk_management(latest, ind_df)
-            
-            # [C] 라이브 백테스트: 기대 MDD 및 회복 일수 산출
             bt_res = self.risk_engine.perform_live_backtest(ind_df, latest)
 
-            # 4. 장부 저장 (latest 중심의 슬림한 호출)
+            # 5. [수정 포인트] 장부 저장 (직접 iloc[-1] 호출 대신 검증된 bench_latest 전달)
             self.ledger.save_entry(
                 ticker=ticker, name=name, market_date=market_date,
                 latest=latest, score=score, details=details,
                 alloc=alloc, bt_res=bt_res, macro_data=macro_snapshot,
-                bench_latest=bench_df.iloc[-1] if bench_df is not None else None,
+                bench_latest=bench_latest, # <- [중요] 여기서 다시 bench_df.iloc[-1]을 호출하지 않습니다.
                 bench_ticker=bench_ticker
             )
             self.ledger.update_forward_returns(ticker)
 
-            # 5. [수정] 고해상도 리포트 출력 (v9.2.0 규격)
-            # ---------------------------------------------------------
-            # bench_ticker를 명시적으로 전달하여 리포트 헤더에 출력되게 합니다.
-            # ---------------------------------------------------------
+            # 6. 리포트 및 결과 반환
             self.reporter.print_audit_report(
                 item, market_date, latest, bench_latest, 
                 score, prev_score, details, alloc, bt_res
             )
-            # [핵심] 요약 테이블을 위해 결과 데이터 반환
+            
             return {
                 "ticker": ticker,
-                "name": name,                                # 종목명 추가
-                "price": latest.get('Close', 0.0),           # 현재가 추가
+                "name": name,
+                "price": latest.get('Close', 0.0),
                 "score": score,
                 "prev_score": prev_score,
-                "action_text": details.get('action', '관망'), # 상세 지침 포함                
+                "action_text": details.get('action', '관망'),
                 "liv_status": details.get('liv_status', 'N/A'),
                 "disp": latest.get('disp120', 100.0),
-                "ei": alloc.get('ei', 0.0),                  # EI 추가
-                "stop": alloc.get('stop_loss', 0.0),         # 손절가 추가
+                "ei": alloc.get('ei', 0.0),
+                "stop": alloc.get('stop_loss', 0.0),
                 "weight": alloc.get('weight', 0.0)
             }
 
         except Exception as e:
             logger.error(f"❌ [{ticker}] 감사 중 치명적 오류: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return None
 
     # [핵심 수정] 파라미터 개수를 호출부(8개)와 정확히 일치시킴
     def send_report(self, ticker, name, level, score, prev_score, details, bench):

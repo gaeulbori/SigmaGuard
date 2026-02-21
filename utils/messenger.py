@@ -1,72 +1,92 @@
 """
 [File Purpose]
-- 시스템 분석 결과 및 감사 리포트를 텔레그램으로 전달하는 전용 통로.
-- [v1.2.0 수정] send_smart_message 로깅 강화 및 예외 처리 로직 통합.
+- [v9.9.0] HTML 오버헤드 대응 및 대용량 주간 리포트 분할 전송 안정화.
+- 텔레그램 글자 수 제한(4096자)을 고려하여 안전 임계치(3000자) 적용.
 """
 
 import requests
 import json
+import time
 from config.settings import settings
 from utils.logger import setup_custom_logger
 
-# 메신저 전용 로거 설정
 logger = setup_custom_logger("Messenger")
 
 class TelegramMessenger:
     def __init__(self, token=None, chat_id=None):
-        # 1. 우선순위: 주입된 값 > settings.py 설정값
         self.token = token if token else settings.TELEGRAM_TOKEN
         self.chat_id = chat_id if chat_id else settings.CHAT_ID
         self.api_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+        # [수정] HTML 태그 포함을 고려한 안전 임계치 설정
+        self.SAFE_LIMIT = 3000 
 
     def _check_config(self):
-        """설정 유효성 검사 (공통 내부 함수)"""
         if not self.token or not self.chat_id:
-            logger.error("❌ 텔레그램 설정(Token/ID)이 누락되었습니다. common/config_manager.py를 확인하세요.")
+            logger.error("❌ 텔레그램 설정 누락: CHAT_ID 혹은 TOKEN을 확인하세요.")
             return False
         return True
 
     def send_message(self, text, parse_mode="HTML"):
-        """기본 전송 메서드 (v8.9.7 정통 로직)"""
-        if not self._check_config(): return False
-        if not text or not text.strip():
-            logger.warning("⚠️ 전송할 메시지 내용이 비어 있습니다.")
-            return False
-
-        MAX_LEN = 3500
-        chunks = [text[i:i + MAX_LEN] for i in range(0, len(text), MAX_LEN)]
+        """기본 전송 메서드 (단순 절단 방식)"""
+        if not self._check_config() or not text: return False
         
+        # 단순 글자 수 기반 분할
+        chunks = [text[i:i + self.SAFE_LIMIT] for i in range(0, len(text), self.SAFE_LIMIT)]
         return self._execute_send(chunks, parse_mode)
 
     def send_smart_message(self, message):
-        """[v9.9.9] 대량 종목 대응형 스마트 분할 전송 (로깅 강화)"""
-        if not self._check_config(): return False
-        if not message or not message.strip():
-            logger.warning("⚠️ [Smart] 전송할 메시지가 비어 있습니다.")
-            return False
+        """[v9.9.0] 단락 보존 및 강제 분할 결합형 (주간 리포트 대응)"""
+        if not self._check_config() or not message: return False
         
-        MAX_LEN = 3500
+        raw_chunks = self._split_smartly(message)
+        
+        logger.info(f"🚀 텔레그램 스마트 전송 개시 (총 {len(raw_chunks)}개 파트 / {len(message)} 자)")
+        return self._execute_send(raw_chunks)
+
+    def _split_smartly(self, message):
+        """[v9.9.1] HTML 태그 무결성을 보존하는 지능형 분할 로직"""
         chunks = []
-
-        # 1. 메시지 분할 로직 (단락 보존형)
-        if len(message) <= MAX_LEN:
-            chunks = [message]
-        else:
-            current_chunk = ""
-            parts = [p.strip() for p in message.split('\n\n') if p.strip()]
-            for part in parts:
-                if len(current_chunk) + len(part) + 2 <= MAX_LEN:
-                    current_chunk += part + '\n\n'
-                else:
-                    if current_chunk: chunks.append(current_chunk.strip())
-                    current_chunk = part + '\n\n'
-            if current_chunk: chunks.append(current_chunk.strip())
-
-        logger.info(f"🚀 텔레그램 스마트 전송 개시 (총 {len(chunks)}개 파트 / {len(message)} 자)")
-        return self._execute_send(chunks)
+        # 텔레그램에서 주로 사용하는 태그 리스트
+        tags_to_track = ['b', 'i', 'code', 'pre', 'u', 'strong', 'em']
+        
+        remaining_text = message
+        while len(remaining_text) > 0:
+            if len(remaining_text) <= self.SAFE_LIMIT:
+                chunks.append(remaining_text)
+                break
+            
+            # 1. 안전한 분할 지점 찾기 (가장 가까운 줄바꿈)
+            split_idx = remaining_text.rfind('\n', 0, self.SAFE_LIMIT)
+            if split_idx == -1: split_idx = self.SAFE_LIMIT
+            
+            current_chunk = remaining_text[:split_idx]
+            next_part = remaining_text[split_idx:]
+            
+            # 2. 열린 태그 추적 및 닫기 보정
+            open_tags = []
+            for tag in tags_to_track:
+                start_count = current_chunk.count(f'<{tag}>')
+                end_count = current_chunk.count(f'</{tag}>')
+                if start_count > end_count:
+                    open_tags.append(tag)
+            
+            # 현재 덩어리 뒤에 닫지 않은 태그들 강제로 닫기 (역순)
+            for tag in reversed(open_tags):
+                current_chunk += f'</{tag}>'
+            
+            chunks.append(current_chunk)
+            
+            # 다음 덩어리 앞에 닫았던 태그들 다시 열어주기
+            reopen_prefix = ""
+            for tag in open_tags:
+                reopen_prefix += f'<{tag}>'
+            
+            remaining_text = reopen_prefix + next_part.lstrip()
+            
+        return chunks
 
     def _execute_send(self, chunks, parse_mode="HTML"):
-        """실제 HTTP 요청을 수행하고 결과를 상세히 로깅 (핵심 수정 지점)"""
+        """실제 전송 수행 (연속 전송 시 과부하 방지 0.5초 대기 추가)"""
         success_count = 0
         
         for i, chunk in enumerate(chunks):
@@ -78,7 +98,6 @@ class TelegramMessenger:
             }
 
             try:
-                # 타임아웃을 15초로 넉넉히 설정
                 response = requests.post(self.api_url, json=payload, timeout=15)
                 res_data = response.json()
                 
@@ -86,13 +105,15 @@ class TelegramMessenger:
                     logger.info(f"   ✅ [Part {i+1}/{len(chunks)}] 전송 성공")
                     success_count += 1
                 else:
-                    # 텔레그램 API에서 에러를 반환한 경우 (예: 잘못된 Chat ID, 토큰 만료 등)
                     error_msg = res_data.get('description', '알 수 없는 오류')
                     logger.error(f"   ❌ [Part {i+1}/{len(chunks)}] API 오류: {error_msg}")
+                
+                # [v9.9.0 추가] 텔레그램 스팸 방지를 위한 미세 지연
+                if len(chunks) > 1:
+                    time.sleep(0.5)
                     
-            except requests.exceptions.RequestException as e:
-                # 네트워크 관련 오류 (타임아웃, DNS 오류 등)
-                logger.error(f"   ❌ [Part {i+1}/{len(chunks)}] 네트워크 예외 발생: {e}")
+            except Exception as e:
+                logger.error(f"   ❌ [Part {i+1}/{len(chunks)}] 네트워크 예외: {e}")
 
         return success_count == len(chunks)
 
@@ -100,4 +121,4 @@ class TelegramMessenger:
 messenger = TelegramMessenger()
 
 def send_telegram(message: str):
-    return messenger.send_message(message)
+    return messenger.send_smart_message(message)

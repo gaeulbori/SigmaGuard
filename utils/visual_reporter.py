@@ -295,9 +295,31 @@ class VisualReporter:
         return emojis.get(lvl, "N/A")
 
     def _fmt_money(self, val, ticker):
-        if val is None or pd.isna(val): return "N/A"
-        is_krw = any(s in str(ticker) for s in ['.KS', '.KQ'])
-        return f"₩{int(val):,}" if is_krw else f"${val:,.2f}"
+        if val is None or pd.isna(val): 
+            return "N/A"
+        
+        ticker_str = str(ticker).upper()
+        
+        # 1. 한국 시장 (KOSPI, KOSDAQ) - 원화(₩) 표시, 소수점 제거
+        if any(ticker_str.endswith(s) for s in ['.KS', '.KQ']):
+            return f"₩{int(val):,}"
+            
+        # 2. 일본 시장 (.T) - 엔화(¥) 표시
+        elif ticker_str.endswith(".T"):
+            return f"¥{val:,.1f}"
+            
+        # 3. 홍콩 시장 (.HK) - 홍콩달러(HK$) 표시
+        elif ticker_str.endswith(".HK"):
+            return f"HK${val:,.2f}"
+            
+        # 4. 중국 시장 (.SS, .SZ) - 위안화(元) 표시
+        elif any(ticker_str.endswith(s) for s in ['.SS', '.SZ']):
+            return f"元{val:,.2f}"
+            
+        # 5. 기본값: 미국 및 기타 시장 - 달러($) 표시
+        else:
+            return f"${val:,.2f}"
+
 
     def _get_visual_width(self, text):
         width = 0

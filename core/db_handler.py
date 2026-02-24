@@ -107,6 +107,7 @@ class DBHandler:
         return amount * 0.001
 
     def calculate_new_avg(self, old_qty, old_avg, new_qty, new_price):
+        """수수료 제외 순수 이동평균 단가 산출 유틸리티 (금융수학 검증용)"""
         if old_qty + new_qty == 0: return 0
         return ((old_qty * old_avg) + (new_qty * new_price)) / (old_qty + new_qty)
 
@@ -120,7 +121,9 @@ class DBHandler:
                 rows = cursor.fetchall()
                 return [dict(zip(columns, row)) for row in rows]
             except Exception as e:
-                return f"조회 중 오류 발생: {e}"
+                import logging
+                logging.getLogger("DBHandler").error(f"trades 조회 오류: {e}")
+                return []
 
     def get_all_holdings(self):
         """현재 보유 중인 모든 종목 정보를 가져옵니다."""
@@ -132,4 +135,6 @@ class DBHandler:
                 rows = cursor.fetchall()
                 return [dict(zip(columns, row)) for row in rows]
             except Exception as e:
-                return f"조회 중 오류 발생: {e}"    
+                import logging
+                logging.getLogger("DBHandler").error(f"holdings 조회 오류: {e}")
+                return []    

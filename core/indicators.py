@@ -153,9 +153,7 @@ class Indicators:
         sigma_cols = ['sig_1y', 'sig_2y', 'sig_3y', 'sig_4y', 'sig_5y']
         df['avg_sigma'] = df[sigma_cols].mean(axis=1, skipna=True)
 
-        # 3. [추가] 리스크 엔진을 위한 보정
-        # 결과가 NaN인 초기 행들을 제거하기 전에 로그를 남깁니다.
-        #logger.info(f"   📊 [Sigma Audit] {target_col} 기반 5개년 다중 시그마 산출 완료")
+        logger.info(f"   📊 [Sigma Audit] {target_col} 기반 5개년 다중 시그마 산출 완료")
         
         return df
     

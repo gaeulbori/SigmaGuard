@@ -31,15 +31,10 @@ class SigmaGuard:
         # 1. 앱 정보 및 전역 설정 (settings 싱글톤에서 직접 참조)
         self.app_info    = settings.CONFIG.get('app_info', {})
         self.sys_settings = settings.CONFIG.get('settings', {})
-        
-        # 2. 로거 먼저 생성 (이 부분이 VisualReporter보다 위에 있어야 합니다!)
-        # 만약 setup_custom_logger를 사용하신다면:
-        from utils.logger import setup_custom_logger
-        self.logger = setup_custom_logger("SigmaGuard_Main") 
-        
-        # 2. 데이터베이스 및 리포터 초기화
-        self.db = DBHandler() # [v10.3.0] 실전 장부 DB 연결
-        from utils.visual_reporter import VisualReporter
+
+        # 2. 로거 및 리포터 초기화
+        self.logger = logger
+        self.db = DBHandler()
         self.reporter = VisualReporter(self.logger)
 
         # 3. 핵심 엔진 초기화
@@ -83,7 +78,7 @@ class SigmaGuard:
             market_date = ind_df.index[-1].strftime('%Y-%m-%d')
 
             # 2. 과거 데이터 복원
-            prev_level, prev_score = self.ledger.get_previous_state(ticker, market_date)            
+            _, prev_score = self.ledger.get_previous_state(ticker, market_date)
             prev_ema = self.ledger.get_previous_sub_scores(ticker, market_date)
 
             # 3. [핵심 에러 방어] 벤치마크 유효성 정밀 검증
@@ -141,42 +136,12 @@ class SigmaGuard:
             logger.debug(traceback.format_exc())
             return None
 
-    # [핵심 수정] 파라미터 개수를 호출부(8개)와 정확히 일치시킴
-    def send_report(self, ticker, name, level, score, prev_score, details, bench):
-        """v9.0.0 David's Analytical Audit Report 포맷 (인자 7개 + self)"""
-        delta_str = ""
-        if prev_score is not None:
-            diff = score - prev_score
-            sign = "▲" if diff > 0 else "▼" if diff < 0 else "-"
-            delta_str = f"({sign}{abs(diff):.1f})"
-        else:
-            delta_str = "(신규)"
-
-        emoji = "🚨" if level >= 5 else "🔴" if level == 4 else "🟡" if level == 3 else "✅"
-        bench_tag = f" [대조: {bench}]" if bench else ""
-
-        message = (
-            f"{emoji} **[{self.app_info.get('edition', 'Audit Edition')}]**\n"
-            f"**{name}({ticker})**{bench_tag}\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"• **상태**: {details.get('scenario', 'N/A')} (Lv.{level})\n"
-            f"• **점수**: `{score:.1f}` 점 {delta_str}\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"• **SOP 지침**: {details.get('action', '관망')}\n"
-            f"• **권고 비중**: {details.get('weight_pct', 0)}% (E.I: {details.get('ei', 0)})\n"
-            f"• **손절 가이드**: {details.get('stop_loss', 0):,}\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"👤 Auditor: {self.app_info.get('author', 'David')} | {self.app_info.get('version', 'v9.0.0')}"
-        )
-        self.messenger.send_message(message)
-
     def execute_all_prev(self):
         watchlist = settings.watchlist
         audit_results_summary = []
         # [핵심] 변화 감지를 위한 카테고리 바구니
         new_stocks, risk_up, risk_down = [], [], []
-            # 2. 기초 데이터 및 매크로 확보
-        macro_snapshot = self.ledger._get_macro_snapshot() or {}           
+        macro_snapshot = self.ledger._get_macro_snapshot() or {}
 
         for item in watchlist:
             audit_data = self.run_audit(item, macro_snapshot)
@@ -338,8 +303,8 @@ class SigmaGuard:
             self.messenger.send_smart_message(delta_body)
         
         # 4. 성과 분석 자동 호출
-        performance_msg = self.analyzer.run_performance_audit() # 리스크 예측력 감사
-        logger.info(f"📊 시스템 예측력 검증 완료")
+        self.analyzer.run_performance_audit()
+        logger.info("📊 시스템 예측력 검증 완료")
 
 # 메인 실행부에서 테스트 모드 호출
 if __name__ == "__main__":

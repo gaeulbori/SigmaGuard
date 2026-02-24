@@ -179,7 +179,7 @@ class LedgerHandler:
                 audit_date = row['Audit_Date']
                 hist = yf.download(ticker, start=audit_date, end=audit_date + timedelta(days=30), progress=False, auto_adjust=True)
                 if not hist.empty:
-                    period_data = hist.iloc[:15]
+                    period_data = hist.iloc[:20]
                     p0 = float(row['Price_T'])
                     df.at[idx, 'Ret_20d'] = round(((period_data['Close'].iloc[-1] - p0) / p0) * 100, 2)
                     df.at[idx, 'Max_Ret_20d'] = round(((period_data['High'].max() - p0) / p0) * 100, 2)

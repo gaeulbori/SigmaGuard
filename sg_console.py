@@ -123,7 +123,8 @@ def main():
         # 2. 시스템 예측력 감사 (CSV 기반)
         audit_msg = analyzer.run_performance_audit()
         # 텔레그램용 HTML 태그 제거 후 출력
-        clean_msg = audit_msg.replace("<b>", "").replace("</b>", "").replace("<br>", "\n")
+        import re
+        clean_msg = re.sub(r'<[^>]+>', '', audit_msg).replace("<br>", "\n")
         print(f"\n{clean_msg}")                
 
 if __name__ == "__main__":

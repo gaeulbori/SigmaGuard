@@ -13,6 +13,7 @@ import sys
 from core.db_handler import DBHandler
 from utils.logger import setup_custom_logger
 from core.sigma_analyzer import SigmaAnalyzer
+from config.settings import settings
 
 # 로그 설정
 logger = setup_custom_logger("Console")
@@ -103,7 +104,7 @@ def main():
                 print(f"{r['ticker']:<10} | {r['qty']:<6} | {r['avg_price']:<10,.0f} | "
                       f"{r['entry_stop']:<10,.0f} | {r['last_updated']:<12}")
     elif args.command == "report":
-        analyzer = SigmaAnalyzer(db)
+        analyzer = SigmaAnalyzer(db, settings.DATA_DIR)
         
         # 1. 실전 매매 성과 (DB 기반)
         stats = analyzer.get_trade_performance()

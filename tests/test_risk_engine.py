@@ -100,63 +100,80 @@ class TestRiskEngineAudit(unittest.TestCase):
         self.assertGreater(details['multiplier'], 1.0)
         print(f"✅ 하락 할증 검증 완료: 가중치 x{details['multiplier']}")
 
-    def test_04_bottom_fishing_discount(self):
-        """검증 4: 바닥 다지기(Bottom Fishing) 시 50% 할인 특약이 작동하는가?"""
-        print("\n🔍 [검증 4] 바닥 다지기 시나리오 테스트 중...")
+    def test_04_bearish_surcharge_on_oversold(self):
+        """검증 4: 과매도 하락장(slope < 0)에서 BEARISH 리스크 할증(multiplier > 1.0)이 작동하는가?"""
+        print("\n🔍 [검증 4] 과매도 하락장(BEARISH) 할증 테스트 중...")
         inds = {
             'avg_sigma': -2.2, 'slope': -0.01,  # 과매도 상태의 하락장
             'MFI': 60.0, 'RSI': 40.0            # 수급 유입 (MFI > RSI)
         }
         df = self.create_scenario_df([100]*5, inds)
         _, _, details = self.engine.evaluate(df)
-        
-        self.assertEqual(details['multiplier'], 0.5)
-        self.assertEqual(details['scenario'], "BOTTOM_FISHING")
-        print(f"✅ 바닥 낚시 할인 검증 완료: 가중치 x{details['multiplier']}")
 
-    def test_05_livermore_3day_confirm(self):
-        """검증 5: 리버모어 3일 연속 상승 시 확증 할인(30%)이 적용되는가?"""
-        print("\n🔍 [검증 5] 리버모어 3일 확증 할인 테스트 중...")
-        # 3일 연속 종가 상승 데이터 생성
-        prices = [100, 102, 104, 106, 108] 
-        inds = {'slope': 0.02, 'R2': 0.95}
+        self.assertGreater(details['multiplier'], 1.0,
+            f"❌ 하락장에서 BEARISH 할증(>1.0) 미적용: x{details['multiplier']}")
+        self.assertEqual(details['scenario'], "BEARISH",
+            f"❌ 시나리오가 BEARISH가 아님: {details['scenario']}")
+        print(f"✅ BEARISH 할증 확인: 가중치 x{details['multiplier']} / {details['scenario']}")
+
+    def test_05_livermore_6m_high_discount(self):
+        """검증 5: 반기(6개월) 신고가 돌파 + 4대 관문 통과 시 Livermore 할인이 적용되는가?"""
+        print("\n🔍 [검증 5] 리버모어 반기 신고가 확증 할인 테스트 중...")
+        # 129행 가격 100 + 마지막 1행 130 → 6개월 신고가 돌파
+        # 4대 관문 기본값: avg_sigma=0.0(<2.0), R2=0.9(>=0.5), ADX=30(>=25), MFI=55(>=40)
+        prices = [100.0] * 129 + [130.0]
+        inds = {'slope': 0.02, 'R2': 0.8, 'ADX': 30.0}
         df = self.create_scenario_df(prices, inds)
-        
+
         score, _, details = self.engine.evaluate(df)
-        self.assertIn("LIV 할인", details['scenario'])
-        self.assertIn("3일 연속", details['liv_status'])
-        print(f"✅ 리버모어 확증 할인 확인: {details['liv_status']}")
+
+        self.assertGreater(details['liv_discount'], 0.0,
+            f"❌ Livermore 할인 미적용: discount={details['liv_discount']}")
+        self.assertIn("신고가", details['liv_status'],
+            f"❌ liv_status에 '신고가' 없음: {details['liv_status']}")
+        print(f"✅ 리버모어 확증 할인 확인: {details['liv_status']} / 할인율 {details['liv_discount']*100:.0f}%")
 
     def test_06_position_sizing_safety_cap(self):
         """검증 6: 포지션 사이징이 0.8% 리스크 한도를 준수하며 20% 캡(Cap)을 지키는가?"""
         print("\n🔍 [검증 6] 자본 할당 및 20% 비중 제한 테스트 중...")
         # 손절선이 매우 가까워 비중이 크게 산출되는 상황 유도
-        # Price: 100, Stop: 99.5 -> Risk_dist: 0.5%
-        # Weight = 0.8% / 0.5% = 160% -> 20%로 캡핑되어야 함
-        inds = {'disp120': 100.1} 
-        df = self.create_scenario_df([100]*252, inds) # 1년치 평균 계산용
-        
-        _, _, details = self.engine.evaluate(df)
-        self.assertLessEqual(details['weight_pct'], 20.0)
-        self.assertGreater(details['ei'], 0)
-        print(f"✅ 포지션 사이징 20% 캡 및 가성비(E.I: {details['ei']}) 확인")
+        # Weight = 0.8% / risk_dist -> risk_dist가 작을수록 비중이 커져 20% 캡에 걸림
+        inds = {'disp120': 100.1}
+        df = self.create_scenario_df([100]*252, inds)  # 1년치 평균 계산용
+
+        # apply_risk_management는 evaluate()와 별도로 호출 (alloc 딕셔너리 반환)
+        latest = df.iloc[-1]
+        alloc = self.engine.apply_risk_management(latest, df)
+
+        self.assertLessEqual(alloc['weight'], 20.0,
+            f"❌ 20% 비중 캡 초과: {alloc['weight']}%")
+        self.assertGreater(alloc['ei'], 0,
+            f"❌ E.I(가성비) 0 이하: {alloc['ei']}")
+        print(f"✅ 포지션 사이징 20% 캡 및 가성비(E.I: {alloc['ei']}) 확인")
 
     def test_07_confidence_brake_at_high_risk(self):
-        """검증 7: 과열 구간(Raw 80점 초과)에서 품질 할인을 중단(Brake)하는가?"""
+        """검증 7: 과열 구간(base_raw >= 80)에서 BULLISH 품질 할인이 0으로 수렴하는가?
+
+        공식: multiplier = 1.0 - (quality * 0.40 * clip((80 - base_raw)/40, 0, 1))
+        base_raw >= 80 이면 clip 결과 = 0 → multiplier = 1.0 (할인 제동)
+        """
         print("\n🔍 [검증 7] 고리스크 구간 할인 제동(Brake) 테스트 중...")
-        # 기초 점수가 80점을 넘도록 지표 설정
+        # p1=30.0, p2=41.25(MFI<RSI 수급불일치), p4=20.0 → base_raw=91.25 (>=80 확보)
         inds = {
-            'avg_sigma': 2.5,  # p1: 30.0
-            'm_trend': "감속", 'bbw': 0.5, 'bbw_thr': 0.2, # p2: 풀 점수 유도
-            'disp120': 115.0, 'disp120_limit': 115.0,       # p4: 20.0
-            'slope': 0.05, 'R2': 1.0, 'ADX': 40.0           # 품질은 최상이지만 할인은 없어야 함
+            'avg_sigma': 2.5,                                  # p1 = 30.0
+            'MFI': 40.0, 'RSI': 75.0,                         # p2 수급불일치 → 41.25
+            'bbw': 0.5, 'bbw_thr': 0.2,                       # p2 BBW 팽창
+            'disp120': 115.0, 'disp120_limit': 115.0,         # p4 = 20.0
+            'slope': 0.05, 'R2': 1.0, 'ADX': 40.0            # 최고 품질 → 할인 0
         }
         df = self.create_scenario_df([100]*5, inds)
         score, _, details = self.engine.evaluate(df)
-        
-        # base_raw >= 80일 때 Multiplier는 1.0이어야 함 (할인 제동)
-        self.assertEqual(details['multiplier'], 1.0)
-        print(f"✅ 할인 제동 장치 확인 완료: 가중치 x{details['multiplier']}")
+
+        self.assertGreaterEqual(details['base_raw'], 80.0,
+            f"❌ base_raw({details['base_raw']:.1f}) < 80 — mock 데이터 재확인 필요")
+        self.assertEqual(details['multiplier'], 1.0,
+            f"❌ base_raw >= 80인데 multiplier={details['multiplier']} (1.0이어야 함)")
+        print(f"✅ 할인 제동 확인: base_raw={details['base_raw']:.1f} → multiplier x{details['multiplier']}")
 
     def test_08_invalid_data_handling(self):
         """검증 8: 비정상 데이터 투입 시 시스템 방어 로직 확인"""

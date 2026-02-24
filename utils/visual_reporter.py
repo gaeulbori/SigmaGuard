@@ -280,15 +280,7 @@ class VisualReporter:
         return f"({'▲' if diff > 0 else '▼' if diff < 0 else '-'}{abs(diff):.1f})"
 
     def _get_lvl(self, s):
-        if s >= 91: return 9
-        if s >= 81: return 8
-        if s >= 71: return 7
-        if s >= 61: return 6
-        if s >= 41: return 5
-        if s >= 31: return 4
-        if s >= 21: return 3
-        if s >= 11: return 2
-        return 1
+        return self.engine.get_level(s)
 
     def _get_label_with_emoji(self, lvl):
         emojis = {9: "🚫 EXIT", 8: "🚨 DANGER", 7: "🔴 WARNING", 6: "🟠 CAUTION", 5: "🟡 WATCH", 4: "🔵 ENTRY", 3: "🟢 ACCUMULATE", 2: "💎 CONCENTRATE", 1: "🔥 FULL"}

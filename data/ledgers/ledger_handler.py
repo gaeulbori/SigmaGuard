@@ -22,6 +22,7 @@ import yfinance as yf
 from datetime import datetime, timedelta
 from config.settings import settings
 from utils.logger import setup_custom_logger
+from core.risk_engine import RiskEngine
 
 logger = setup_custom_logger("LedgerHandler")
 
@@ -30,6 +31,7 @@ class LedgerHandler:
         self.data_dir = settings.DATA_DIR / "ledgers"
         if not self.data_dir.exists():
             self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._risk_engine = RiskEngine()
 
         # 표준 53개 헤더 규격 (David's Master Spec)
         self.headers = [
@@ -64,15 +66,7 @@ class LedgerHandler:
         return self.data_dir / f"sigma_guard_ledger_{ticker}.csv"
 
     def _get_level(self, score):
-        if score >= 91: return 9
-        elif score >= 81: return 8
-        elif score >= 71: return 7
-        elif score >= 61: return 6
-        elif score >= 41: return 5
-        elif score >= 31: return 4
-        elif score >= 21: return 3
-        elif score >= 11: return 2
-        else: return 1
+        return self._risk_engine.get_level(score)
 
     def _format_value(self, ticker, value, category="normal"):
         """[David's Refined Standard] 통화별/지표별 자릿수 정밀 제어"""

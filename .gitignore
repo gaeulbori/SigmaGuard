@@ -14,6 +14,7 @@ logs/*.log
 *.log.*
 data/ledgers/*.csv
 data/portfolio/*.json
+data/db/*.db
 tests/data
 tests/logs
 

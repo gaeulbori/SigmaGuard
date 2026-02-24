@@ -408,7 +408,7 @@ class VisualReporter:
             score = audit.get('score', 0)
             score_prev = audit.get('prev_score')
             delta_str = self._get_delta_str(score, score_prev)
-            reco_stop = audit.get('recommended_stop', 0)
+            reco_stop = audit.get('stop', 0)
             
             avg_price = h.get('avg_price', 0)
             qty = h.get('qty', 0)

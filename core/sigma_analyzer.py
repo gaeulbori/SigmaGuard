@@ -28,7 +28,7 @@ class SigmaAnalyzer:
         completed = df[df['type'] == 'SELL'].copy()
         
         if completed.empty:
-            return "완료된 매도 기록이 없습니다."
+            return None
 
         # 기본 통계 계산
         total_trades = len(completed)
@@ -80,10 +80,10 @@ class SigmaAnalyzer:
 
             msg = "📊 <b>[리스크 등급별 예측력 검증]</b>\n"
             msg += "━━━━━━━━━━━━━━\n"
-            for level in [5, 4, 3, 2, 1]:
+            for level in [9, 8, 7, 6, 5, 4, 3, 2, 1]:
                 if level in summary.index:
                     row = summary.loc[level]
-                    icon = "🚨" if level >= 5 else "🔴" if level == 4 else "🟡" if level == 3 else "✅"
+                    icon = "🚨" if level >= 6 else "🔴" if level in (4, 5) else "🟡" if level == 3 else "✅"
                     msg += f"{icon} Lv.{level}: {int(row['Case_Count'])}건 (평균낙폭 {row['Min_Ret_20d']:>+.1f}%)\n"
                 else:
                     msg += f"⚪ Lv.{level}: 데이터 없음\n"

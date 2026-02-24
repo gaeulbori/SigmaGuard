@@ -9,11 +9,7 @@
 - Performance Feedback: DB 기반 실전 매매 통계와 CSV 기반 리스크 예측력을 통합 분석.
 """
 
-import os
-import sys
-import yaml
 import pandas as pd
-from pathlib import Path
 from datetime import datetime
 
 # 핵심 모듈 임포트
@@ -32,12 +28,9 @@ logger = setup_custom_logger("SigmaGuard_Main")
 
 class SigmaGuard:
     def __init__(self):
-        # 1. 환경 설정 초기화 (common 디렉토리 및 설정 로드)
-        self.secret_config, self.config_yaml = self._setup_environment()
-        
-        # 2. 앱 정보 및 전역 설정 추출
-        self.app_info = self.config_yaml.get('app_info', {})
-        self.sys_settings = self.config_yaml.get('settings', {})
+        # 1. 앱 정보 및 전역 설정 (settings 싱글톤에서 직접 참조)
+        self.app_info    = settings.CONFIG.get('app_info', {})
+        self.sys_settings = settings.CONFIG.get('settings', {})
         
         # 2. 로거 먼저 생성 (이 부분이 VisualReporter보다 위에 있어야 합니다!)
         # 만약 setup_custom_logger를 사용하신다면:
@@ -65,44 +58,6 @@ class SigmaGuard:
 
         logger.info(f"🛡️ {self.app_info.get('version')} {self.app_info.get('edition')} 가동")
         logger.info(f"👤 Auditor: {self.app_info.get('author')} (OCI Ready)")
-
-    def _setup_environment(self):
-        # OCI와 Local Mac 환경을 동시에 지원하는 후보 경로
-        home = os.path.expanduser("~")
-        possible_common_paths = [
-            os.path.join(home, "Documents/work/common"),
-            os.path.join(home, "work/common")
-        ]
-        
-        common_dir = None
-        for path in possible_common_paths:
-            if os.path.exists(path):
-                common_dir = path
-                if path not in sys.path:
-                    sys.path.append(path)
-                break
-                
-        if not common_dir:
-            logger.error("❌ common 디렉토리를 찾을 수 없습니다. 경로를 확인하세요.")
-            sys.exit(1)
-
-        # 보안 설정 로드 (SecretConfig)
-        try:
-            from config_manager import SecretConfig
-        except ImportError:
-            logger.error("❌ common/config_manager.py 파일을 찾을 수 없습니다.")
-            sys.exit(1)
-
-        # YAML 설정 로드
-        yaml_path = os.path.join(common_dir, "SG_config.yaml")
-        if not os.path.exists(yaml_path):
-            logger.error(f"❌ {yaml_path} 파일이 존재하지 않습니다.")
-            sys.exit(1)
-        
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            config_yaml = yaml.safe_load(f)
-            
-        return SecretConfig, config_yaml
 
     def run_audit(self, item, macro_snapshot):
         """[v9.8.9 Fix] 벤치마크 빈 데이터셋 접근 오류(Out-of-Bounds) 완전 방어"""
@@ -216,7 +171,7 @@ class SigmaGuard:
         self.messenger.send_message(message)
 
     def execute_all_prev(self):
-        watchlist = self.config_yaml.get('watchlist', [])
+        watchlist = settings.watchlist
         audit_results_summary = []
         # [핵심] 변화 감지를 위한 카테고리 바구니
         new_stocks, risk_up, risk_down = [], [], []
@@ -331,7 +286,7 @@ class SigmaGuard:
     def execute_all(self):
         """[v10.3.0 핵심 로직] 감시 종목과 보유 종목 통합 감사 실행"""
         # 1. 데이터 로드: Watchlist(YAML) + Holdings(DB)
-        yaml_watchlist = self.config_yaml.get('watchlist', [])
+        yaml_watchlist = settings.watchlist
         holdings = self.db.get_all_holdings() #
         
         # 보유 종목 티커 리스트 추출 및 중복 제거 합치기
@@ -372,7 +327,7 @@ class SigmaGuard:
         self.reporter.print_audit_summary_table(list(audit_results_summary.values()))
         
         # (2) [v10.3.0] 터미널: David's Fortress 실전 자산 리포트
-        total_capital = self.config_yaml.get('settings', {}).get('total_capital', 500000000)
+        total_capital = self.sys_settings.get('total_capital', 500000000)
         # 1. 실시간 다중 환율 수급
         exchange_rates = self.indicators.get_exchange_rates()        
         self.reporter.print_fortress_report(holdings, audit_results_summary, total_capital, self.risk_engine, exchange_rates)

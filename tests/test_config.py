@@ -46,7 +46,8 @@ class TestConfigFullAudit(unittest.TestCase):
         self.assertGreater(len(settings.watchlist), 0, "❌ watchlist가 비어 있음")
         
         # 2. App Info 및 Version 확인
-        self.assertEqual(settings.app_version, 'v8.8.8', f"❌ 버전 정보 불일치: {settings.app_version}")
+        self.assertRegex(settings.app_version, r'^v\d+\.\d+\.\d+$',
+                         f"❌ 버전 형식 불일치: {settings.app_version}")
         print(f"✅ 속성 매핑 확인 (Version: {settings.app_version}, Watchlist: {len(settings.watchlist)}개)")
 
     def test_03_path_and_permission_audit(self):

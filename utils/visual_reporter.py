@@ -341,3 +341,137 @@ class VisualReporter:
             if width + w > length - 2: return self._pad_visual(res + "..", length)
             res += char; width += w
         return self._pad_visual(res, length)
+
+    def print_fortress_report(self, holdings, audit_results, total_capital, risk_engine, rates):        
+        """[v10.4.7] David's Strategic Asset Audit: 시각적 폭 보정 및 세로열 완전 정렬"""
+        if not holdings:
+            self.logger.info(" ------------------------------ 🛡️ [David's STRATEGIC ASSET AUDIT] -----------------------------")
+            self.logger.info("  📭 현재 보유 중인 종목이 없어 자산 리포트를 생성하지 않았습니다.")
+            self.logger.info(" -----------------------------------------------------------------------------------------------")
+            return
+
+        # 1. 컬럼별 고정 너비 설정 (CPA 정밀 규격)
+        W = {
+            'no': 4, 'name': 26, 'qty': 6, 'avg': 12, 'cur': 12, 
+            'ret': 8, 'val': 16, 'wgt': 7, 'score': 12, 'act': 25
+        }
+
+        # 2. 실전 자산 상태 선계산 (KRW 기준 통합)
+        total_purchase_cost_krw = 0 
+        total_stock_value_krw = 0
+
+        for h in holdings:
+            ticker = h['ticker'].upper()
+            audit = audit_results.get(h['ticker'], {})
+            cur_price = audit.get('price', 0)
+            qty = h.get('qty', 0)
+            avg_price = h.get('avg_price', 0)
+            
+            # 통화 판별 및 환율 적용
+            if any(ticker.endswith(s) for s in ['.KS', '.KQ']): rate = rates.get('KRW', 1.0)
+            elif ticker.endswith(".T"): rate = rates.get('JPY', 9.0)
+            elif any(ticker.endswith(s) for s in ['.SS', '.SZ']): rate = rates.get('CNY', 185.0)
+            else: rate = rates.get('USD', 1350.0)
+
+            total_purchase_cost_krw += (qty * avg_price * rate)
+            total_stock_value_krw += (qty * cur_price * rate)
+
+        # 자산 합계 산출 (원화 기준)
+        # $$TotalAssets_{KRW} = (TotalCapital - PurchaseCost_{KRW}) + StockValue_{KRW}$$
+        cash_balance_krw = total_capital - total_purchase_cost_krw
+        total_assets_krw = cash_balance_krw + total_stock_value_krw
+
+        self.logger.info(" ")
+        self.logger.info(" 🛡️ [David's STRATEGIC ASSET AUDIT: 보유 자산 운용 리포트]")
+        self.logger.info(f" [환율기준: USD ₩{rates.get('USD'):.1f} | JPY ₩{rates.get('JPY'):.1f} | CNY ₩{rates.get('CNY'):.1f}]")
+        
+        # 구분선 길이 계산 (공백 및 세로선 포함)
+        line_sep = "-" * (sum(W.values()) + (len(W) - 1) * 3 + 4)
+        self.logger.info(f" {line_sep}")
+        
+        # 헤더 조립 (시각적 패딩 적용)
+        header = (
+            f"  {self._pad_visual('NO', W['no'], 'center')} | "
+            f"{self._pad_visual('NAME(TICKER)', W['name'], 'left')} | "
+            f"{self._pad_visual('QTY', W['qty'], 'right')} | "
+            f"{self._pad_visual('AVG.PRICE', W['avg'], 'right')} | "
+            f"{self._pad_visual('CUR.PRICE', W['cur'], 'right')} | "
+            f"{self._pad_visual('RETURN', W['ret'], 'right')} | "
+            f"{self._pad_visual('총평가금(원화)', W['val'], 'right')} | "
+            f"{self._pad_visual('비중', W['wgt'], 'right')} | "
+            f"{self._pad_visual('SCORE', W['score'], 'right')} | "
+            f"{self._pad_visual('Level (Action)', W['act'], 'left')}"
+        )
+        self.logger.info(header)
+        self.logger.info(f" {line_sep}")
+
+        # 3. 데이터 로우 출력
+        for i, h in enumerate(holdings, 1):
+            ticker = h['ticker']
+            ticker_upper = ticker.upper()
+            audit = audit_results.get(ticker, {})
+            
+            name = audit.get('name', ticker)
+            cur_price = audit.get('price', 0)
+            score = audit.get('score', 0)
+            score_prev = audit.get('prev_score')
+            delta_str = self._get_delta_str(score, score_prev)
+            reco_stop = audit.get('recommended_stop', 0)
+            
+            avg_price = h.get('avg_price', 0)
+            qty = h.get('qty', 0)
+            
+            # 종목별 환율 다시 계산 (비중 및 원화 평가금 산출용)
+            if any(ticker_upper.endswith(s) for s in ['.KS', '.KQ']): rate = rates.get('KRW', 1.0)
+            elif ticker_upper.endswith(".T"): rate = rates.get('JPY', 9.0)
+            elif any(ticker_upper.endswith(s) for s in ['.SS', '.SZ']): rate = rates.get('CNY', 185.0)
+            else: rate = rates.get('USD', 1350.0)
+
+            eval_value_krw = qty * cur_price * rate
+            
+            # 수치 데이터 문자열화
+            return_pct = ((cur_price / avg_price) - 1) * 100 if avg_price > 0 else 0
+            ret_str = f"{return_pct:>+6.1f}%"
+            val_krw_str = f"{eval_value_krw:,.0f}"
+            weight_val = (eval_value_krw / total_assets_krw) * 100 if total_assets_krw > 0 else 0
+            wgt_str = f"{weight_val:>4.1f}%"
+            score_display = f"{score:.1f}{delta_str}"
+            
+            # 등급 및 액션 추출
+            label, lvl, action_full = risk_engine.get_sop_info(score)
+            emoji = self._get_label_with_emoji(lvl).split()[0]
+            action_short = str(action_full).split(':')[0].strip()
+            
+            # 특수 상황 반영
+            if reco_stop > h.get('entry_stop', 0) and cur_price > reco_stop: action_short = "익절가상향"
+            if cur_price <= reco_stop and cur_price > 0: action_short = "즉시탈출"
+                
+            level_action = f"{emoji} LV.{lvl} {action_short}"
+            
+            # 가격 포맷팅 (현지 통화)
+            p_str = self._fmt_money(cur_price, ticker)
+            a_str = self._fmt_money(avg_price, ticker)
+
+            # 최종 라인 조립
+            line = (
+                f"  {self._pad_visual(i, W['no'], 'center')} | "
+                f"{self._truncate_and_pad_visual(f'{name}({ticker})', W['name'])} | "
+                f"{self._pad_visual(int(qty), W['qty'], 'right')} | "
+                f"{self._pad_visual(a_str, W['avg'], 'right')} | "
+                f"{self._pad_visual(p_str, W['cur'], 'right')} | "
+                f"{self._pad_visual(ret_str, W['ret'], 'right')} | "
+                f"{self._pad_visual(val_krw_str, W['val'], 'right')} | "
+                f"{self._pad_visual(wgt_str, W['wgt'], 'right')} | "
+                f"{self._pad_visual(score_display, W['score'], 'right')} | "
+                f"{self._truncate_and_pad_visual(level_action, W['act'])}"
+            )
+            self.logger.info(line)
+
+        # 4. 최종 자산 합계 및 수익률 계산
+        total_profit_krw = total_assets_krw - total_capital
+        total_return_pct = (total_profit_krw / total_capital) * 100 if total_capital > 0 else 0
+
+        self.logger.info(f" {line_sep}")
+        footer = f"  [현금: ₩{cash_balance_krw:,.0f} | 주식: ₩{total_stock_value_krw:,.0f} | 총자산: ₩{total_assets_krw:,.0f} | 수익: ₩{total_profit_krw:+,.0f} ({total_return_pct:+.2f}%)]"
+        self.logger.info(footer)
+        self.logger.info(" ")

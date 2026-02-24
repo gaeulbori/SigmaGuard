@@ -248,3 +248,39 @@ class Indicators:
         hist = macd - signal
         res = np.where(hist > hist.shift(1), "상승가속", "감속")
         return hist, pd.Series(res, index=df.index)
+
+    def get_exchange_rates(self):
+        """
+        [v10.4.2] 다중 통화 실시간 환율 수급
+        - USD/KRW, JPY/KRW, CNY/KRW 정보를 딕셔너리로 반환합니다.
+        """
+        # 통화별 야후 파이낸스 티커 매핑
+        tickers = {
+            "USD": "USDKRW=X",
+            "JPY": "JPYKRW=X",
+            "CNY": "CNYKRW=X"
+        }
+        
+        rates = {"KRW": 1.0} # 기본 통화
+        
+        try:
+            # 한 번의 호출로 모든 환율 데이터 수집
+            data = yf.download(list(tickers.values()), period="5d", interval="1d", progress=False, auto_adjust=True)            
+            
+            if not data.empty:
+                for label, ticker in tickers.items():
+                    try:
+                        # 통화별 최신 종가 추출
+                        current_rate = data['Close'][ticker].iloc[-1]
+                        rates[label] = float(current_rate)
+                    except:
+                        # 개별 통화 실패 시 보수적 기본값 적용
+                        default_rates = {"USD": 1350.0, "JPY": 9.0, "CNY": 185.0}
+                        rates[label] = default_rates[label]
+            
+            #logger.info(f"🌐 환율 동기화 완료: USD:{rates['USD']:.1f}, JPY:{rates['JPY']:.1f}, CNY:{rates['CNY']:.1f}")
+            return rates
+            
+        except Exception as e:
+            logger.error(f"❌ 환율 수급 치명적 오류: {e}")
+            return {"KRW": 1.0, "USD": 1350.0, "JPY": 9.0, "CNY": 185.0}

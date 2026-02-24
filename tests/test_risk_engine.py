@@ -42,9 +42,9 @@ class TestRiskEngineAudit(unittest.TestCase):
             'Volume': [1000] * len(price_list)
         })
         
-        # 기본값 설정
+        # 기본값 설정 (indicators.py 컬럼명과 대소문자 일치)
         default_inds = {
-            'avg_sigma': 0.0, 'rsi': 50.0, 'mfi': 55.0, 
+            'avg_sigma': 0.0, 'RSI': 50.0, 'MFI': 55.0,
             'bbw': 0.1, 'bbw_thr': 0.3, 'm_trend': "상승가속",
             'ma_slope': "Rising", 'disp120': 100.0, 'disp120_limit': 115.0, 'disp120_avg': 105.0,
             'slope': 0.01, 'R2': 0.9, 'ADX': 30.0
@@ -61,21 +61,22 @@ class TestRiskEngineAudit(unittest.TestCase):
         """검증 1: 평온한 시장에서 LEVEL 1(매수) 또는 2(안정)를 유지하는가?"""
         print("\n🔍 [검증 1] 정상 시장(Stable) 시나리오 테스트 중...")
         inds = {
-            'avg_sigma': 0.2, 'rsi': 45.0, 'mfi': 50.0, 
+            'avg_sigma': 0.2, 'RSI': 45.0, 'MFI': 50.0,
             'slope': 0.01, 'R2': 0.8, 'ADX': 25.0
         }
         df = self.create_scenario_df([100]*5, inds)
         score, grade, _ = self.engine.evaluate(df)
         
         self.assertLess(score, 46, f"❌ 정상 시장인데 점수가 너무 높습니다: {score}")
-        self.assertIn("LEVEL", grade)
+        valid_labels = {"STRONG BUY", "CONCENTRATE", "ACCUMULATE", "ENTRY", "WATCH"}
+        self.assertIn(grade, valid_labels, f"❌ 예상 SOP 레이블이 아님: {grade}")
         print(f"✅ 정상 시장 검증 완료: {score}점 ({grade})")
 
     def test_02_danger_bubble_market(self):
         """검증 2: 극심한 과열(Bubble) 시 LEVEL 5(DANGER)를 포착하는가?"""
         print("\n🔍 [검증 2] 과열 시장(Bubble) 시나리오 테스트 중...")
         inds = {
-            'avg_sigma': 2.8, 'rsi': 85.0, 'mfi': 82.0, 'bbw': 0.45, 'bbw_thr': 0.3,
+            'avg_sigma': 2.8, 'RSI': 85.0, 'MFI': 82.0, 'bbw': 0.45, 'bbw_thr': 0.3,
             'm_trend': "상승감속", 'disp120': 125.0, 'disp120_limit': 115.0,
             'slope': 0.05, 'R2': 0.4, 'ADX': 45.0
         }
@@ -83,7 +84,7 @@ class TestRiskEngineAudit(unittest.TestCase):
         score, grade, _ = self.engine.evaluate(df)
         
         self.assertGreaterEqual(score, 81, f"❌ 과열 구간 포착 실패: {score}")
-        self.assertIn("LEVEL 5", grade)
+        self.assertIn(grade, {"DANGER", "EXIT"}, f"❌ 예상 SOP 레이블이 아님: {grade}")
         print(f"✅ 과열 시장(DANGER) 포착 완료: {score}점 ({grade})")
 
     def test_03_bear_panic_surcharge(self):
@@ -103,8 +104,8 @@ class TestRiskEngineAudit(unittest.TestCase):
         """검증 4: 바닥 다지기(Bottom Fishing) 시 50% 할인 특약이 작동하는가?"""
         print("\n🔍 [검증 4] 바닥 다지기 시나리오 테스트 중...")
         inds = {
-            'avg_sigma': -2.2, 'slope': -0.01, # 과매도 상태의 하락장
-            'mfi': 60.0, 'rsi': 40.0           # 수급 유입 (MFI > RSI)
+            'avg_sigma': -2.2, 'slope': -0.01,  # 과매도 상태의 하락장
+            'MFI': 60.0, 'RSI': 40.0            # 수급 유입 (MFI > RSI)
         }
         df = self.create_scenario_df([100]*5, inds)
         _, _, details = self.engine.evaluate(df)

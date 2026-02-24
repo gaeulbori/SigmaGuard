@@ -216,7 +216,7 @@ class RiskEngine:
             
         return "구조적 추세 전환 대기 (박스권)", 0.0
 
-    def _get_level(self, score):
+    def get_level(self, score):
         """[v9.7.0] 9단계 정밀 리스크 레벨 판정 (David's Antifragile Scale)"""
         if score >= 91: return 9   # Exit (100%)
         if score >= 81: return 8   # Aggressive Sell (70%)
@@ -230,7 +230,7 @@ class RiskEngine:
 
     def get_sop_info(self, score):
         """[v9.7.0] 9단계 분할 매매 실행 지침 (Standard Operating Procedure)"""
-        lvl = self._get_level(score)
+        lvl = self.get_level(score)
         
         sop_map = {
             9: ("EXIT", "전량 회수: 리스크 극단치. 보유 물량 100% 매도 및 현금화"),
@@ -277,7 +277,7 @@ class RiskEngine:
         return round(np.clip(avg_sigma / self.SIGMA_CRITICAL_LEVEL, 0, 1) * self.W_POS_BASE, 1)
 
     def _calc_energy_risk(self, latest):
-        mfi, rsi = latest.get('mfi', 50.0), latest.get('rsi', 50.0)
+        mfi, rsi = latest.get('MFI', 50.0), latest.get('RSI', 50.0)
         bbw, bbw_thr = latest.get('bbw', 0.0), latest.get('bbw_thr', 0.3)
         s_macd = self.MACD_REVERSAL_RISK if latest.get('macd_h', 0) < 0 else self.MACD_STABLE_LOW_RISK
         s_bbw = self.BBW_EXPANSION_RISK if bbw > bbw_thr else self.BBW_NORMAL_RISK

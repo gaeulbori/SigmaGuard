@@ -1,12 +1,12 @@
 """
 [File Purpose]
-- Phase 1~3 통합: v8.9.7 정통 리스크 감사 파이프라인 완성.
-- 기능: 사후 수익률 결산(T+20), 리스크 델타(▲/▼) 추적, 지능형 자본 할당 보고.
+- Phase 1~5 통합: 실전 매매 DB 연동 및 David's Fortress 리포트 자동화.
+- 기능: 보유 종목 자동 감지, 실시간 수익률 계산, 이중 손절선(Entry vs Reco) 감사.
 
 [Key Features]
-- Audit Delta: 전일 대비 리스크 점수 변동폭을 감지하여 조기 경보 수행.
-- Performance Feedback: 전수 감사 후 등급별 성과 요약(SigmaAnalyzer) 자동 발행.
-- 39-Header Mapping: 5개년 다중 시그마 및 리버모어 상태 등 모든 정밀 지표를 장부에 동기화.
+- DB Integrated Audit: holdings 테이블의 종목을 watchlist와 병합하여 자동 전수 감사.
+- Fortress Visualization: 리포트 하단에 David 전용 전략 자산 운용 현황(Fortress) 출력.
+- Performance Feedback: DB 기반 실전 매매 통계와 CSV 기반 리스크 예측력을 통합 분석.
 """
 
 import os
@@ -20,11 +20,13 @@ from datetime import datetime
 from core.indicators import Indicators
 from core.risk_engine import RiskEngine
 from core.sigma_analyzer import SigmaAnalyzer
+from core.db_handler import DBHandler          # [v10.3.0 추가] SQLite 핸들러
 from data.ledgers.ledger_handler import LedgerHandler
 from utils.messenger import TelegramMessenger
 from utils.logger import setup_custom_logger
 from utils.visual_reporter import VisualReporter
 from config.settings import settings
+from utils.market_utils import get_regional_benchmark
 
 logger = setup_custom_logger("SigmaGuard_Main")
 
@@ -42,7 +44,8 @@ class SigmaGuard:
         from utils.logger import setup_custom_logger
         self.logger = setup_custom_logger("SigmaGuard_Main") 
         
-        # 3. 이제 생성된 self.logger를 리포터에 전달
+        # 2. 데이터베이스 및 리포터 초기화
+        self.db = DBHandler() # [v10.3.0] 실전 장부 DB 연결
         from utils.visual_reporter import VisualReporter
         self.reporter = VisualReporter(self.logger)
 
@@ -51,22 +54,21 @@ class SigmaGuard:
         self.risk_engine = RiskEngine()
         self.ledger = LedgerHandler()
         
+        # [v10.3.0 수정] 분석기에 DB 핸들러 주입 (실전 성과 분석용)
+        self.analyzer = SigmaAnalyzer(self.db, settings.DATA_DIR)
+
         # 4. [v9.0.0] SecretConfig를 메신저에 주입 (보안 연결)
-        # SecretConfig에서 텔레그램 토큰과 ID를 가져오도록 설계됨
         self.messenger = TelegramMessenger(
-            token=getattr(self.secret_config, "TELEGRAM_TOKEN", None),
-            chat_id=getattr(self.secret_config, "CHAT_ID", None)
+            token=settings.TELEGRAM_TOKEN,
+            chat_id=settings.CHAT_ID
         )
-        self.analyzer = SigmaAnalyzer(settings.DATA_DIR)
-        self.reporter = VisualReporter(self.logger) # 리포터 임계
 
         logger.info(f"🛡️ {self.app_info.get('version')} {self.app_info.get('edition')} 가동")
         logger.info(f"👤 Auditor: {self.app_info.get('author')} (OCI Ready)")
 
     def _setup_environment(self):
-        """[David's Legacy Logic] 공통 디렉토리 탐색 및 설정 로드"""
-        home = os.path.expanduser("~")
         # OCI와 Local Mac 환경을 동시에 지원하는 후보 경로
+        home = os.path.expanduser("~")
         possible_common_paths = [
             os.path.join(home, "Documents/work/common"),
             os.path.join(home, "work/common")
@@ -213,7 +215,7 @@ class SigmaGuard:
         )
         self.messenger.send_message(message)
 
-    def execute_all(self):
+    def execute_all_prev(self):
         watchlist = self.config_yaml.get('watchlist', [])
         audit_results_summary = []
         # [핵심] 변화 감지를 위한 카테고리 바구니
@@ -325,6 +327,64 @@ class SigmaGuard:
         # 4. 최종 전송 (스마트 분할 기술 적용)
         self.messenger.send_smart_message(final_msg)
         self.logger.info("🏁 테스트 메시지가 텔레그램으로 발송되었습니다.")
+
+    def execute_all(self):
+        """[v10.3.0 핵심 로직] 감시 종목과 보유 종목 통합 감사 실행"""
+        # 1. 데이터 로드: Watchlist(YAML) + Holdings(DB)
+        yaml_watchlist = self.config_yaml.get('watchlist', [])
+        holdings = self.db.get_all_holdings() #
+        
+        # 보유 종목 티커 리스트 추출 및 중복 제거 합치기
+        holding_tickers = [h['ticker'] for h in holdings]
+        total_audit_list = yaml_watchlist.copy()
+        
+        # Watchlist에 없는 보유 종목 추가
+        for h_ticker in holding_tickers:
+            if not any(item['ticker'] == h_ticker for item in total_audit_list):
+                default_bench, b_name = get_regional_benchmark(h_ticker)
+                
+                total_audit_list.append({
+                    'ticker': h_ticker, 
+                    'name': h_ticker, 
+                    'bench': default_bench,
+                    'bench_name': b_name
+                })                
+
+        audit_results_summary = {}
+        new_stocks, risk_up, risk_down = [], [], []
+        macro_snapshot = self.ledger._get_macro_snapshot() or {}           
+
+        # 2. 전수 조사 실행
+        for item in total_audit_list:
+            audit_data = self.run_audit(item, macro_snapshot)
+            if audit_data:
+                audit_results_summary[audit_data['ticker']] = audit_data
+                # 델타 알림 메시지 생성 및 분류
+                msg = self.reporter.build_delta_alert_msg(audit_data)
+                if msg:
+                    prev = audit_data.get('prev_score')
+                    if prev is None: new_stocks.append(msg)
+                    elif audit_data['score'] > prev: risk_up.append(msg)
+                    else: risk_down.append(msg)
+
+        # 3. 리포트 출력 및 발송
+        # (1) 터미널: 감시 종목 요약표
+        self.reporter.print_audit_summary_table(list(audit_results_summary.values()))
+        
+        # (2) [v10.3.0] 터미널: David's Fortress 실전 자산 리포트
+        total_capital = self.config_yaml.get('settings', {}).get('total_capital', 500000000)
+        # 1. 실시간 다중 환율 수급
+        exchange_rates = self.indicators.get_exchange_rates()        
+        self.reporter.print_fortress_report(holdings, audit_results_summary, total_capital, self.risk_engine, exchange_rates)
+
+        # (3) 텔레그램: 스마트 메시지 발송
+        delta_body = self.reporter.assemble_delta_alerts(new_stocks, risk_up, risk_down)
+        if delta_body:
+            self.messenger.send_smart_message(delta_body)
+        
+        # 4. 성과 분석 자동 호출
+        performance_msg = self.analyzer.run_performance_audit() # 리스크 예측력 감사
+        logger.info(f"📊 시스템 예측력 검증 완료")
 
 # 메인 실행부에서 테스트 모드 호출
 if __name__ == "__main__":

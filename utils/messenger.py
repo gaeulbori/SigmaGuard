@@ -28,7 +28,7 @@ class TelegramMessenger:
 
     def send_message(self, text, parse_mode="HTML"):
         """기본 전송 메서드 (단순 절단 방식)"""
-        if not self._check_config() or not text: return False
+        if not self._check_config() or not (text and text.strip()): return False
         
         # 단순 글자 수 기반 분할
         chunks = [text[i:i + self.SAFE_LIMIT] for i in range(0, len(text), self.SAFE_LIMIT)]
@@ -36,7 +36,7 @@ class TelegramMessenger:
 
     def send_smart_message(self, message):
         """[v9.9.0] 단락 보존 및 강제 분할 결합형 (주간 리포트 대응)"""
-        if not self._check_config() or not message: return False
+        if not self._check_config() or not (message and message.strip()): return False
         
         raw_chunks = self._split_smartly(message)
         

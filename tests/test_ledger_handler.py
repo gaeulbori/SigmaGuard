@@ -38,12 +38,17 @@ class TestLedgerAudit(unittest.TestCase):
         self.ticker_kr = "005930.KS"
         self.ticker_us = "GOLD"
         self.sample_date = datetime.now().strftime("%Y-%m-%d")
-        
-        # 기본 Mock 데이터 설정
-        self.tech = {'price': 150.0, 'rsi': 55.0, 'mfi': 60.0, 'bbw': 0.1, 'bbw_thr': 0.3, 'disp120': 100.0}
-        self.stat = {'avg_sigma': 1.5, 'sig_1y': 1.0, 'sig_2y': 1.0, 'sig_3y': 1.0, 'sig_4y': 1.0, 'sig_5y': 1.0}
+
+        # [v9.7.0+] 현행 save_entry() API 기준 Mock 데이터 (latest 단일 dict)
+        self.latest = {
+            'Close': 150.0, 'RSI': 55.0, 'MFI': 60.0, 'bbw': 0.1, 'bbw_thr': 0.3,
+            'disp120': 100.0, 'disp120_limit': 115.0, 'R2': 0.9, 'ADX': 25.0,
+            'avg_sigma': 1.5, 'sig_1y': 1.0, 'sig_2y': 1.0, 'sig_3y': 1.0,
+            'sig_4y': 1.0, 'sig_5y': 1.0
+        }
         self.alloc = {'stop_loss': 140.0, 'risk_pct': 2.5, 'ei': 100, 'weight': 10.0}
         self.details = {'base_raw': 70, 'multiplier': 1.0, 'scenario': 'Bull', 'p1': 20, 'p2': 30, 'p4': 20}
+        self.bt_res = {'avg_mdd': -5.0}
 
     def tearDown(self):
         """테스트 종료 후 임시 데이터 삭제"""
@@ -52,10 +57,10 @@ class TestLedgerAudit(unittest.TestCase):
     def test_01_currency_formatting_audit(self):
         print("\n🔍 [검증 1] 통화별 규격화 테스트 중...")
         # 원화 가격 정수화 확인
-        krw_val = self.handler._format_value(self.ticker_kr, 75600.78, is_price=True)
+        krw_val = self.handler._format_value(self.ticker_kr, 75600.78, "price")
         self.assertEqual(krw_val, 75601)
         # 달러 가격 소수점 3자리 확인
-        usd_val = self.handler._format_value(self.ticker_us, 17.5678, is_price=True)
+        usd_val = self.handler._format_value(self.ticker_us, 17.5678, "price")
         self.assertEqual(usd_val, 17.568)
         print("✅ 통화별 가격 포맷팅 검증 완료")
 
@@ -64,13 +69,13 @@ class TestLedgerAudit(unittest.TestCase):
         file_path = self.handler._get_file_path(self.ticker_us)
         
         # 1. 기존에 이미 결산된(Ret_20d 존재) 데이터가 있다고 가정
-        self.handler.save_entry(self.ticker_us, "Barrick", self.sample_date, self.tech, self.stat, None, None, 50.0, self.details, self.alloc, {}, "Hold")
+        self.handler.save_entry(self.ticker_us, "Barrick", self.sample_date, self.latest, 50.0, self.details, self.alloc, self.bt_res, {})
         df_init = pd.read_csv(file_path)
         df_init.at[0, 'Ret_20d'] = 12.5 # 수동 결산 데이터 기입
         df_init.to_csv(file_path, index=False)
-        
+
         # 2. 동일 날짜에 새로운 점수로 업데이트 실행
-        self.handler.save_entry(self.ticker_us, "Barrick", self.sample_date, self.tech, self.stat, None, None, 85.0, self.details, self.alloc, {}, "Sell")
+        self.handler.save_entry(self.ticker_us, "Barrick", self.sample_date, self.latest, 85.0, self.details, self.alloc, self.bt_res, {})
         
         # 3. 확인: 점수는 바뀌었지만, 기존 결산 데이터(Ret_20d)는 보존되어야 함
         df_updated = pd.read_csv(file_path)
@@ -80,9 +85,9 @@ class TestLedgerAudit(unittest.TestCase):
 
     def test_03_header_standard_check(self):
         print("\n🔍 [검증 3] v8.9.7+ 표준 39개 컬럼 규격 감사 중...")
-        self.handler.save_entry(self.ticker_us, "Barrick", self.sample_date, self.tech, self.stat, None, None, 70.0, self.details, self.alloc, {}, "Hold")
+        self.handler.save_entry(self.ticker_us, "Barrick", self.sample_date, self.latest, 70.0, self.details, self.alloc, self.bt_res, {})
         df = pd.read_csv(self.handler._get_file_path(self.ticker_us))
-        self.assertEqual(len(df.columns), 39)
+        self.assertEqual(len(df.columns), 53)
         self.assertIn("Ret_20d", df.columns)
         print(f"✅ 총 {len(df.columns)}개 표준 컬럼 정합성 확인")
 
@@ -90,7 +95,7 @@ class TestLedgerAudit(unittest.TestCase):
         print("\n🔍 [검증 4] 시계열 데이터 누적 테스트 중...")
         dates = ["2026-01-26", "2026-01-27", "2026-01-28"]
         for d in dates:
-            self.handler.save_entry(self.ticker_us, "Barrick", d, self.tech, self.stat, None, None, 70.0, self.details, self.alloc, {}, "Hold")
+            self.handler.save_entry(self.ticker_us, "Barrick", d, self.latest, 70.0, self.details, self.alloc, self.bt_res, {})
         df = pd.read_csv(self.handler._get_file_path(self.ticker_us))
         self.assertEqual(len(df), 3)
         print("✅ 3일치 데이터 시계열 누적 확인 완료")
@@ -99,16 +104,17 @@ class TestLedgerAudit(unittest.TestCase):
         print("\n🔍 [검증 5] 과거 기록된 상태(Level/Score) 조회 테스트 중...")
         # 어제 날짜로 데이터 강제 기입
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        self.handler.save_entry(self.ticker_us, "Barrick", yesterday, self.tech, self.stat, None, None, 85.0, self.details, self.alloc, {}, "Sell")
-        
-        level, score = self.handler.get_previous_state(self.ticker_us)
-        self.assertEqual(level, 5) # 85점은 Level 5
+        self.handler.save_entry(self.ticker_us, "Barrick", yesterday, self.latest, 85.0, self.details, self.alloc, self.bt_res, {})
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        level, score = self.handler.get_previous_state(self.ticker_us, today)
+        self.assertEqual(level, 8) # 85점은 Level 8 (v9.7.0 9단계 규격: 81~90 → 8)
         self.assertEqual(score, 85.0)
         print(f"✅ 과거 상태 조회 확인 (Lv.{level} / {score}점)")
 
     def test_06_robustness_on_empty_file(self):
         print("\n🔍 [검증 6] 장부 부재 시 예외 처리 테스트 중...")
-        level, score = self.handler.get_previous_state("NON_EXISTENT")
+        level, score = self.handler.get_previous_state("NON_EXISTENT", datetime.now().strftime("%Y-%m-%d"))
         self.assertIsNone(level)
         self.assertIsNone(score)
         print("✅ 예외 상황 안정성 확인 완료")
@@ -121,8 +127,8 @@ class TestLedgerAudit(unittest.TestCase):
         date_target = (datetime.now() - timedelta(days=25)).strftime("%Y-%m-%d")
         date_wait = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
         
-        self.handler.save_entry(self.ticker_us, "Barrick", date_target, self.tech, self.stat, None, None, 50.0, self.details, self.alloc, {}, "Hold")
-        self.handler.save_entry(self.ticker_us, "Barrick", date_wait, self.tech, self.stat, None, None, 60.0, self.details, self.alloc, {}, "Hold")
+        self.handler.save_entry(self.ticker_us, "Barrick", date_target, self.latest, 50.0, self.details, self.alloc, self.bt_res, {})
+        self.handler.save_entry(self.ticker_us, "Barrick", date_wait, self.latest, 60.0, self.details, self.alloc, self.bt_res, {})
         
         # 2. 결산 메서드 실행 (yfinance 호출 에러 방지를 위해 mask 로직만 간접 검증 가능)
         # 여기서는 update_forward_returns 내의 필터링 로직이 20일 경과 건만 잡는지 확인

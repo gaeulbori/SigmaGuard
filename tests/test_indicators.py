@@ -155,7 +155,7 @@ class TestIndicatorsAudit(unittest.TestCase):
     def test_11_macd_trend_logic(self):
         """검증 11: MACD 가속/감속 판정 논리의 일관성 증명"""
         print("\n🔍 [검증 11] MACD 트렌드 판정 논리 감사 중...")
-        trend = self.indicators.calc_macd_trend(self.linear_up)
+        _, trend = self.indicators.calc_macd_trend(self.linear_up)
         # 선형 상승 시 MACD 히스토그램은 증가 추세를 보임
         self.assertIn("상승가속", trend.values)
         print("✅ MACD 트렌드 판정 로직 확인 완료")

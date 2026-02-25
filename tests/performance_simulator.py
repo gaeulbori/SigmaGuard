@@ -896,7 +896,7 @@ class PerformanceReporter:
         """
         :param daily_path:  일별 로그 CSV 경로 (None이면 기본 전체 경로 사용)
         :param trades_path: 완료 거래 CSV 경로 (None이면 기본 전체 경로 사용)
-        :param cache_map:   민감도 분석용 캐시맵 (None이면 민감도 분석 건너뜀)
+        :param cache_map:   민감도 분석용 캐시맵 (None이면 디스크에서 자동 로드)
         """
         daily_path  = daily_path  or os.path.join(RESULTS_DIR, "daily_log.csv")
         trades_path = trades_path or os.path.join(RESULTS_DIR, "closed_trades.csv")
@@ -912,6 +912,13 @@ class PerformanceReporter:
         daily_pf = daily[daily['Portfolio_KRW'].notna()].copy()
         daily_pf.sort_values('Date', inplace=True)
         daily_pf.set_index('Date', inplace=True)
+
+        # cache_map 미제공 시 디스크에서 자동 로드 (전체 파이프라인 지원)
+        if cache_map is None:
+            self.logger.info("📂 cache_map 자동 로드 중 (민감도 분석용)...")
+            _sim_tmp = PortfolioSimulator.__new__(PortfolioSimulator)
+            _sim_tmp.logger = self.logger
+            cache_map = _sim_tmp._load_all_caches()
 
         self._print_portfolio_perf(daily_pf)
         self._print_trade_stats(trades)
@@ -1036,7 +1043,7 @@ class PerformanceReporter:
             self.logger.info("    Entry_Conditions 컬럼 없음 — 분석 건너뜀")
 
     # ── 4. ATR 파라미터 민감도 분석 ─────────────────────────────────────────
-    def _print_sensitivity(self, trades, cache_map=None):
+    def _print_sensitivity(self, _trades, cache_map=None):
         self.logger.info("━" * 70)
         self.logger.info("📊 [4/4] ATR 배수 & 진입 조건 파라미터 민감도 분석")
         self.logger.info("━" * 70)

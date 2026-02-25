@@ -923,7 +923,7 @@ class PerformanceReporter:
         self._print_portfolio_perf(daily_pf)
         self._print_trade_stats(trades)
         self._print_signal_analysis(trades)
-        self._print_sensitivity(trades, cache_map=cache_map)
+        self._print_sensitivity(cache_map=cache_map)
 
     # ── 1. 포트폴리오 성과 ────────────────────────────────────────────────────
     def _print_portfolio_perf(self, daily_pf):
@@ -1043,7 +1043,7 @@ class PerformanceReporter:
             self.logger.info("    Entry_Conditions 컬럼 없음 — 분석 건너뜀")
 
     # ── 4. ATR 파라미터 민감도 분석 ─────────────────────────────────────────
-    def _print_sensitivity(self, _trades, cache_map=None):
+    def _print_sensitivity(self, cache_map=None):
         self.logger.info("━" * 70)
         self.logger.info("📊 [4/4] ATR 배수 & 진입 조건 파라미터 민감도 분석")
         self.logger.info("━" * 70)

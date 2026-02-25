@@ -819,6 +819,8 @@ class PortfolioSimulator:
         total_combined_usd = total_usd + total_krw / fx
         self.daily_log.append({
             'Date':               date.strftime('%Y-%m-%d'),
+            'Signal':             'DAILY_SNAPSHOT',
+            'Signal_Reason':      f'Holdings={len(self.holdings)}',
             'Cash_KRW':           round(self.cash_krw, 0),
             'Stock_KRW':          round(krw_stock, 0),
             'Portfolio_KRW':      round(total_krw, 0),

@@ -733,14 +733,18 @@ class PortfolioSimulator:
 
     def _record_daily(self, date, cache_map, fx_rate):
         """일별 포트폴리오 잔고 기록"""
-        krw_stock = sum(
-            float((self._get_row(cache_map, t, date) or {}).get('Close', 0) or 0) * h['qty']
-            for t, h in self.holdings.items() if h.get('currency') == 'KRW'
-        )
-        usd_stock = sum(
-            float((self._get_row(cache_map, t, date) or {}).get('Close', 0) or 0) * h['qty']
-            for t, h in self.holdings.items() if h.get('currency') != 'KRW'
-        )
+        def _stock_val(currency_filter):
+            total = 0.0
+            for t, h in self.holdings.items():
+                if (h.get('currency') == 'KRW') != (currency_filter == 'KRW'):
+                    continue
+                row = self._get_row(cache_map, t, date)
+                if row is not None:
+                    total += float(row.get('Close', 0) or 0) * h['qty']
+            return total
+
+        krw_stock = _stock_val('KRW')
+        usd_stock = _stock_val('USD')
         total_krw = self.cash_krw + krw_stock
         total_usd = self.cash_usd + usd_stock
         self.daily_log.append({
@@ -794,9 +798,13 @@ class PerformanceReporter:
         self.logger.addHandler(fh)
 
     # ── 공개 API ──────────────────────────────────────────────────────────────
-    def run(self):
-        daily_path  = os.path.join(RESULTS_DIR, "daily_log.csv")
-        trades_path = os.path.join(RESULTS_DIR, "closed_trades.csv")
+    def run(self, daily_path: str = None, trades_path: str = None):
+        """
+        :param daily_path:  일별 로그 CSV 경로 (None이면 기본 전체 경로 사용)
+        :param trades_path: 완료 거래 CSV 경로 (None이면 기본 전체 경로 사용)
+        """
+        daily_path  = daily_path  or os.path.join(RESULTS_DIR, "daily_log.csv")
+        trades_path = trades_path or os.path.join(RESULTS_DIR, "closed_trades.csv")
 
         if not os.path.exists(daily_path):
             self.logger.error("❌ daily_log.csv 없음 — PortfolioSimulator.run()을 먼저 실행하세요.")
@@ -805,7 +813,7 @@ class PerformanceReporter:
         daily  = pd.read_csv(daily_path, parse_dates=['Date'])
         trades = pd.read_csv(trades_path, parse_dates=['Date']) if os.path.exists(trades_path) else pd.DataFrame()
 
-        # 포트폴리오 일별 잔고만 추출
+        # 포트폴리오 일별 잔고 스냅샷 행 추출 (신호 행과 분리)
         daily_pf = daily[daily['Portfolio_KRW'].notna()].copy()
         daily_pf.sort_values('Date', inplace=True)
         daily_pf.set_index('Date', inplace=True)
@@ -980,112 +988,142 @@ if __name__ == "__main__":
 
     # ── 단독 종목 테스트 모드 ──────────────────────────────────────────────────
     if args.ticker:
-        print(f"\n🧪 단독 종목 테스트: {args.ticker}")
+        ticker_test = args.ticker
+        safe_name   = _safe_ticker_name(ticker_test)
+        currency_test = _get_currency(ticker_test)
+        symbol        = '$' if currency_test == 'USD' else '₩'
+        init_pf       = INIT_USD if currency_test == 'USD' else INIT_KRW
 
-        ind = Indicators()
+        print(f"\n🧪 단독 종목 테스트: {ticker_test}", flush=True)
+        print(f"   기간: {SIM_START} ~ {SIM_END}")
+        print("=" * 70, flush=True)
+
+        # ── [Step 1] 지표 생성 + 캐시 저장 ───────────────────────────
+        print(f"\n  📡 [Step 1] {ticker_test} 지표 생성 및 캐시 저장...", flush=True)
+        ind  = Indicators()
         reng = RiskEngine()
-
-        print(f"  [Step 1] {args.ticker} 지표 생성 중...")
-        ind_df, bench_df = ind.generate(args.ticker, period="10y", bench=None)
+        ind_df, bench_df = ind.generate(ticker_test, period="10y", bench=None)
 
         if ind_df is None or ind_df.empty:
-            print(f"  ❌ [{args.ticker}] 데이터 없음")
-        else:
-            # 시뮬레이션 기간 점수 워크-포워드 계산 (샘플: 최근 20일)
-            sim_mask  = (ind_df.index >= SIM_START) & (ind_df.index <= SIM_END)
-            sim_dates = ind_df.index[sim_mask]
+            print(f"  ❌ [{ticker_test}] 데이터 없음")
+            sys.exit(1)
 
-            print(f"  시뮬 기간 거래일: {len(sim_dates)}일")
-            print(f"  [Step 2] 워크-포워드 점수 계산 (마지막 20일 샘플)...")
+        sim_mask  = (ind_df.index >= SIM_START) & (ind_df.index <= SIM_END)
+        sim_dates = ind_df.index[sim_mask]
+        print(f"  시뮬 기간 거래일: {len(sim_dates)}일")
 
-            results  = []
-            prev_ema = None
-            for date in sim_dates:
-                ind_slice   = ind_df[:date]
-                bench_slice = bench_df[:date] if (bench_df is not None and not bench_df.empty) else None
-                if len(ind_slice) < 30:
-                    continue
-                score, _, details = reng.evaluate(ind_slice, bench_slice, prev_ema)
-                level = reng.get_level(score)
-                if details:
-                    prev_ema = {
-                        'p1_ema': details.get('p1_ema', details.get('p1', 0)),
-                        'p2_ema': details.get('p2_ema', details.get('p2', 0)),
-                        'p4_ema': details.get('p4_ema', details.get('p4', 0)),
-                    }
-                results.append({
-                    'Date': date.strftime('%Y-%m-%d'),
-                    'Close': ind_df.loc[date].get('Close', 0),
-                    'Score': round(score, 2),
-                    'Level': level,
-                    'p1': round(details.get('p1', 0), 2) if details else 0,
-                    'p2': round(details.get('p2', 0), 2) if details else 0,
-                    'p4': round(details.get('p4', 0), 2) if details else 0,
-                })
-
-            df_res = pd.DataFrame(results)
-            if not df_res.empty:
-                sample = df_res.tail(20)
-                print(f"\n  [Step 3] 최근 20일 점수 결과:")
-                print(f"  {'Date':<12} {'Close':>10} {'Score':>7} {'Lv':>3} "
-                      f"{'p1':>6} {'p2':>6} {'p4':>6}")
-                print(f"  {'-'*56}")
-                for _, r in sample.iterrows():
-                    print(
-                        f"  {r['Date']:<12} {r['Close']:>10.2f} "
-                        f"{r['Score']:>7.2f} {r['Level']:>3} "
-                        f"{r['p1']:>6.2f} {r['p2']:>6.2f} {r['p4']:>6.2f}"
-                    )
-
-                # 요약 통계
-                print(f"\n  [요약 통계] ({len(df_res)}일 전체)")
-                print(f"  점수 평균: {df_res['Score'].mean():.2f}")
-                print(f"  점수 범위: {df_res['Score'].min():.2f} ~ {df_res['Score'].max():.2f}")
-                print(f"  레벨 분포: {df_res['Level'].value_counts().sort_index().to_dict()}")
-
-                # 캐시 저장
-                cache_path = os.path.join(
-                    CACHE_DIR, f"{_safe_ticker_name(args.ticker)}_computed.csv"
-                )
-                df_res_full = []
-                prev_ema = None
-                for date in sim_dates:
-                    ind_slice   = ind_df[:date]
-                    bench_slice = bench_df[:date] if (bench_df is not None and not bench_df.empty) else None
-                    if len(ind_slice) < 30:
-                        continue
-                    score, _, details = reng.evaluate(ind_slice, bench_slice, prev_ema)
-                    level = reng.get_level(score)
-                    if details:
-                        prev_ema = {
-                            'p1_ema': details.get('p1_ema', details.get('p1', 0)),
-                            'p2_ema': details.get('p2_ema', details.get('p2', 0)),
-                            'p4_ema': details.get('p4_ema', details.get('p4', 0)),
-                        }
-                    row = ind_df.loc[date]
-                    r = {'Date': date.strftime('%Y-%m-%d')}
-                    for col in PreComputeEngine.IND_COLS:
-                        val = row.get(col, np.nan) if hasattr(row, 'get') else np.nan
-                        r[col] = val
-                    r.update({
-                        'Score': round(float(score), 2),
-                        'Risk_Level': int(level),
-                        'p1': round(float(details.get('p1', 0)), 2) if details else 0.0,
-                        'p2': round(float(details.get('p2', 0)), 2) if details else 0.0,
-                        'p4': round(float(details.get('p4', 0)), 2) if details else 0.0,
-                    })
-                    df_res_full.append(r)
-
-                if df_res_full:
-                    pd.DataFrame(df_res_full).to_csv(cache_path, index=False, encoding='utf-8')
-                    print(f"\n  ✅ 캐시 저장 완료: {cache_path}")
-                    print(f"  저장 행: {len(df_res_full)}일")
+        df_res_full = []
+        prev_ema    = None
+        for date in sim_dates:
+            ind_slice   = ind_df[:date]
+            bench_slice = bench_df[:date] if (bench_df is not None and not bench_df.empty) else None
+            if len(ind_slice) < 30:
+                continue
+            score, _, details = reng.evaluate(ind_slice, bench_slice, prev_ema)
+            level = reng.get_level(score)
+            if details:
+                prev_ema = {
+                    'p1_ema': details.get('p1_ema', details.get('p1', 0)),
+                    'p2_ema': details.get('p2_ema', details.get('p2', 0)),
+                    'p4_ema': details.get('p4_ema', details.get('p4', 0)),
+                }
+            row_val = ind_df.loc[date]
+            r = {'Date': date.strftime('%Y-%m-%d')}
+            for col in PreComputeEngine.IND_COLS:
+                r[col] = row_val.get(col, np.nan) if hasattr(row_val, 'get') else np.nan
+            r.update({
+                'Score':      round(float(score), 2),
+                'Risk_Level': int(level),
+                'p1': round(float(details.get('p1', 0)), 2) if details else 0.0,
+                'p2': round(float(details.get('p2', 0)), 2) if details else 0.0,
+                'p4': round(float(details.get('p4', 0)), 2) if details else 0.0,
+            })
+            df_res_full.append(r)
 
         del ind_df, bench_df
         gc.collect()
 
+        if not df_res_full:
+            print(f"  ❌ [{ticker_test}] 유효 결과 없음")
+            sys.exit(1)
+
+        df_cache   = pd.DataFrame(df_res_full)
+        cache_path = os.path.join(CACHE_DIR, f"{safe_name}_computed.csv")
+        df_cache.to_csv(cache_path, index=False, encoding='utf-8')
+
+        # 최근 20일 미리보기
+        sample = df_cache.tail(20)
+        print(f"\n  최근 20일 점수 샘플:")
+        print(f"  {'Date':<12} {'Close':>10} {'Score':>7} {'Lv':>3} {'p1':>6} {'p2':>6} {'p4':>6}")
+        print(f"  {'-'*58}")
+        for _, r in sample.iterrows():
+            print(
+                f"  {r['Date']:<12} {r['Close']:>10.2f} "
+                f"{r['Score']:>7.2f} {int(r['Risk_Level']):>3} "
+                f"{r['p1']:>6.2f} {r['p2']:>6.2f} {r['p4']:>6.2f}"
+            )
+
+        lv_dist = df_cache['Risk_Level'].value_counts().sort_index()
+        lv_str  = " / ".join(f"Lv{int(k)}({int(v)}일)" for k, v in lv_dist.items())
+        print(f"\n  전체 요약 ({len(df_cache)}일)")
+        print(f"  {'─'*60}")
+        print(f"  {'점수 평균':<10}: {df_cache['Score'].mean():.2f}")
+        print(f"  {'점수 범위':<10}: {df_cache['Score'].min():.2f} ~ {df_cache['Score'].max():.2f}")
+        print(f"  {'LV 분포':<10}: {lv_str}")
+        print(f"  {'캐시 저장':<10}: {cache_path} ({len(df_cache)}행)")
+
+        # ── [Step 2] 단독 종목 포트폴리오 시뮬레이션 ─────────────────
+        print(f"\n  📈 [Step 2] 포트폴리오 시뮬레이션 ({ticker_test} 단독)...", flush=True)
+
+        sim = PortfolioSimulator()
+
+        # 캐시 직접 주입 (단독 종목)
+        cache_df        = df_cache.copy()
+        cache_df.index  = pd.to_datetime(cache_df['Date'])
+        cache_df.sort_index(inplace=True)
+        cache_map_single = {ticker_test: cache_df}
+
+        all_dates = sorted(cache_df[SIM_START:SIM_END].index)
+        print(f"  시뮬레이션 거래일: {len(all_dates)}일")
+
+        for date in all_dates:
+            sim._process_day(date, cache_map_single)
+
+        # 단독 종목 전용 결과 파일 경로
+        log_path_single    = os.path.join(RESULTS_DIR, f"daily_log_{safe_name}.csv")
+        trades_path_single = os.path.join(RESULTS_DIR, f"closed_trades_{safe_name}.csv")
+        pd.DataFrame(sim.daily_log).to_csv(log_path_single, index=False, encoding='utf-8')
+        pd.DataFrame(sim.closed_trades).to_csv(trades_path_single, index=False, encoding='utf-8')
+
+        # 최종 잔고: 일별 스냅샷의 마지막 행 (미청산 포지션 포함)
+        snap_rows = [r for r in sim.daily_log if r.get('Portfolio_KRW') is not None]
+        if snap_rows and currency_test == 'USD':
+            final_pf = float(snap_rows[-1].get('Portfolio_USD', init_pf))
+        elif snap_rows:
+            final_pf = float(snap_rows[-1].get('Portfolio_KRW', init_pf))
+        else:
+            final_pf = init_pf
+
+        ret_pct = (final_pf - init_pf) / init_pf * 100
+        print(f"  완료 거래: {len(sim.closed_trades)}건")
+        print(f"  최종 잔고: {symbol}{final_pf:,.2f}  (수익률 {ret_pct:+.2f}%)")
+        print(f"  미청산 포지션: {len(sim.holdings)}건")
+        print(f"  거래 로그: {log_path_single}")
+
+        # ── [Step 3] 성과 리포트 ──────────────────────────────────────
+        print(f"\n  📊 [Step 3] 성과 리포트...", flush=True)
+        print("=" * 70, flush=True)
+
+        reporter = PerformanceReporter()
+        reporter.run(
+            daily_path  = log_path_single,
+            trades_path = trades_path_single,
+        )
+
+        print(f"\n✅ [{ticker_test}] Step 1~3 전체 완료", flush=True)
+
     else:
-        # ── 전체 파이프라인 실행 ───────────────────────────────────────────────
+        # ── 전체 파이프라인 실행 ──────────────────────────────────────
         run_all   = (args.step == 0)
         run_step1 = run_all or (args.step == 1)
         run_step2 = run_all or (args.step == 2)

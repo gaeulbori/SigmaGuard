@@ -50,7 +50,7 @@ FETCH_START      = "2014-01-01"   # 5y 시그마 확보를 위한 선행 데이�
 INIT_KRW         = 40_000_000     # KRW 초기 자금
 INIT_USD         = 10_000.0       # USD 초기 자금
 MAX_HOLDINGS     = 10             # 최대 동시 보유 종목
-MAX_WEIGHT_PCT   = 5.0            # 종목당 최대 비중 (%)
+MAX_WEIGHT_PCT   = 3.0            # 종목당 최대 비중 (%)
 ACCOUNT_RISK     = 0.008          # 단일 종목 최대 손실 허용 (0.8%)
 
 # ── 시뮬레이션 레저 53컬럼 (sigma_guard_ledger 포맷 호환) ─────────────────────
@@ -268,7 +268,8 @@ class PortfolioSimulator:
     TIME_OPP_DAYS       = 90
     TIME_OPP_PCT        = 5.0
 
-    def __init__(self, atr_low=None, atr_mid=None, atr_high=None, entry_min=None):
+    def __init__(self, atr_low=None, atr_mid=None, atr_high=None, entry_min=None,
+                 market_filter=None):
         self.logger      = setup_custom_logger("PortfolioSimulator")
         self.risk_engine = RiskEngine()
 
@@ -280,6 +281,9 @@ class PortfolioSimulator:
 
         # ── 환율 캐시 ──────────────────────────────────────────────────────────
         self.fx_krw = self._load_fx("USDKRW=X")
+
+        # ── 시장 방향 필터 (SPY / ^KS200 MA200) ───────────────────────────────
+        self.market_filter = market_filter if market_filter is not None else self._load_market_filter()
 
         # ── 포트폴리오 상태 ────────────────────────────────────────────────────
         self.cash_krw = float(INIT_KRW)
@@ -313,6 +317,39 @@ class PortfolioSimulator:
             return float(self.fx_krw.asof(date))
         except Exception:
             return 1400.0
+
+    # ── 시장 필터 ─────────────────────────────────────────────────────────────
+    def _load_market_filter(self) -> dict:
+        """
+        SPY(USD) 및 ^KS200(KRW)의 MA200 상/하 여부를 날짜별로 사전 로드.
+        반환: {'USD': pd.Series[bool], 'KRW': pd.Series[bool]}
+        """
+        result = {}
+        for label, ticker in [('USD', 'SPY'), ('KRW', '^KS200')]:
+            try:
+                df = yf.download(ticker, start="2018-01-01", end="2025-12-31",
+                                 interval="1d", progress=False, auto_adjust=True)
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                close = df['Close'].ffill().dropna()
+                ma200 = close.rolling(200, min_periods=50).mean()
+                result[label] = (close >= ma200).ffill()
+                self.logger.info(f"  📊 시장 필터 로드 완료 [{ticker}]")
+            except Exception as e:
+                self.logger.warning(f"⚠️ 시장 필터 로드 실패 ({ticker}): {e} — 필터 비활성화")
+                result[label] = pd.Series(dtype=bool)
+        return result
+
+    def _is_market_ok(self, currency: str, date) -> bool:
+        """해당 통화권 지수가 MA200 위에 있으면 True (필터 미로드 시 진입 허용)"""
+        series = self.market_filter.get(currency)
+        if series is None or series.empty:
+            return True
+        try:
+            val = series.asof(date)
+            return True if pd.isna(val) else bool(val)
+        except Exception:
+            return True
 
     # ── 캐시 로드 ─────────────────────────────────────────────────────────────
     def _load_all_caches(self) -> dict[str, pd.DataFrame]:
@@ -409,6 +446,10 @@ class PortfolioSimulator:
             entry_candidates = []
             for ticker in cache_map:
                 if ticker in self.holdings:
+                    continue
+                # 시장 필터: SPY/KS200 MA200 이하 시 신규 진입 차단
+                currency = _get_currency(ticker)
+                if not self._is_market_ok(currency, date):
                     continue
                 row = self._get_row(cache_map, ticker, date)
                 if row is None:
@@ -774,16 +815,19 @@ class PortfolioSimulator:
         usd_stock = _stock_val('USD')
         total_krw = self.cash_krw + krw_stock
         total_usd = self.cash_usd + usd_stock
+        fx        = fx_rate if fx_rate and fx_rate > 0 else 1400.0
+        total_combined_usd = total_usd + total_krw / fx
         self.daily_log.append({
-            'Date':          date.strftime('%Y-%m-%d'),
-            'Cash_KRW':      round(self.cash_krw, 0),
-            'Stock_KRW':     round(krw_stock, 0),
-            'Portfolio_KRW': round(total_krw, 0),
-            'Cash_USD':      round(self.cash_usd, 2),
-            'Stock_USD':     round(usd_stock, 2),
-            'Portfolio_USD': round(total_usd, 2),
-            'FX_Rate':       round(fx_rate, 1),
-            'Holdings':      len(self.holdings),
+            'Date':               date.strftime('%Y-%m-%d'),
+            'Cash_KRW':           round(self.cash_krw, 0),
+            'Stock_KRW':          round(krw_stock, 0),
+            'Portfolio_KRW':      round(total_krw, 0),
+            'Cash_USD':           round(self.cash_usd, 2),
+            'Stock_USD':          round(usd_stock, 2),
+            'Portfolio_USD':      round(total_usd, 2),
+            'Portfolio_Total_USD': round(total_combined_usd, 2),
+            'FX_Rate':            round(fx_rate, 1),
+            'Holdings':           len(self.holdings),
         })
 
     def _save_sim_ledger(self, cache_map: dict, path: str = None):
@@ -942,8 +986,9 @@ class PerformanceReporter:
         ks200 = self._fetch_bench("^KS200", SIM_START, SIM_END)
 
         for label, col in [
-            ("KRW 포트폴리오", "Portfolio_KRW"),
-            ("USD 포트폴리오", "Portfolio_USD"),
+            ("KRW 포트폴리오",  "Portfolio_KRW"),
+            ("USD 포트폴리오",  "Portfolio_USD"),
+            ("통합 포트폴리오", "Portfolio_Total_USD"),
         ]:
             if col not in daily_pf.columns or daily_pf[col].dropna().empty:
                 continue
@@ -1065,6 +1110,11 @@ class PerformanceReporter:
             ("엄격진입(ATR×2/2.5/3, entry≥3)",  dict(atr_low=2.0, atr_mid=2.5, atr_high=3.0, entry_min=3)),
         ]
 
+        # 시장 필터 1회 사전 로드 (4개 설정 공유 → 중복 다운로드 방지)
+        _mf_tmp = PortfolioSimulator.__new__(PortfolioSimulator)
+        _mf_tmp.logger = self.logger
+        shared_market_filter = _mf_tmp._load_market_filter()
+
         all_dates = sorted(set(
             d for df in cache_map.values()
             for d in df[SIM_START:SIM_END].index
@@ -1076,7 +1126,7 @@ class PerformanceReporter:
         self.logger.info(f"  {'─'*36} {'─'*5} {'─'*6} {'─'*9} {'─'*7}")
 
         for label, params in configs:
-            sim = PortfolioSimulator(**params)
+            sim = PortfolioSimulator(**params, market_filter=shared_market_filter)
             for date in all_dates:
                 sim._process_day(date, cache_map)
 

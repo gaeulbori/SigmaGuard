@@ -53,6 +53,22 @@ MAX_HOLDINGS     = 10             # 최대 동시 보유 종목
 MAX_WEIGHT_PCT   = 5.0            # 종목당 최대 비중 (%)
 ACCOUNT_RISK     = 0.008          # 단일 종목 최대 손실 허용 (0.8%)
 
+# ── 시뮬레이션 레저 53컬럼 (sigma_guard_ledger 포맷 호환) ─────────────────────
+SIM_LEDGER_COLS = [
+    'Audit_Date', 'Ticker', 'Name', 'Risk_Score', 'Risk_Level',
+    'Price_T', 'Sigma_T_Avg',
+    'Sigma_T_1y', 'Sigma_T_2y', 'Sigma_T_3y', 'Sigma_T_4y', 'Sigma_T_5y',
+    'RSI_T', 'MFI_T', 'BBW_T', 'R2_T', 'ADX_T', 'Disp_T_120',
+    'Ticker_B', 'Price_B', 'Sigma_B_Avg', 'RSI_B', 'MFI_B', 'ADX_B', 'BBW_B',
+    'Stop_Price', 'Risk_Gap_Pct', 'Invest_EI', 'Weight_Pct', 'Expected_MDD',
+    'Livermore_Status', 'Base_Raw_Score', 'Risk_Multiplier', 'Trend_Scenario',
+    'Score_Pos', 'Score_Pos_EMA', 'Score_Ene', 'Score_Ene_EMA',
+    'Score_Trap', 'Score_Trap_EMA',
+    'VIX_T', 'US10Y_T', 'DXY_T', 'MACD_Hist_T', 'MACD_Hist_B',
+    'ADX_Gap', 'Disp_Limit', 'BBW_Thr', 'LIV_Discount', 'SOP_Action',
+    'Ret_20d', 'Min_Ret_20d', 'Max_Ret_20d',
+]
+
 # ── 통화 구분 유틸 ─────────────────────────────────────────────────────────────
 def _get_currency(ticker: str) -> str:
     """티커 접미사로 통화 분류 → 'KRW' 또는 'USD'"""
@@ -350,6 +366,8 @@ class PortfolioSimulator:
         trades_path = os.path.join(RESULTS_DIR, "closed_trades.csv")
         pd.DataFrame(self.closed_trades).to_csv(trades_path, index=False, encoding='utf-8')
 
+        self._save_sim_ledger(cache_map)
+
         self.logger.info(
             f"💾 시뮬레이션 완료 — "
             f"거래: {len(self.closed_trades)}건 | "
@@ -398,14 +416,14 @@ class PortfolioSimulator:
                 prev_row   = self._get_prev_row(cache_map, ticker, date)
                 prev_score = float(prev_row.get('Score', 99)) if prev_row is not None else None
 
-                is_entry, _ = self._check_entry_trigger(score, row, prev_row, prev_score)
+                is_entry, conditions = self._check_entry_trigger(score, row, prev_row, prev_score)
                 if is_entry:
-                    entry_candidates.append((score, ticker, row))
+                    entry_candidates.append((score, ticker, row, conditions))
 
             # 점수 낮은 순 (리스크 최저) 우선
             entry_candidates.sort(key=lambda x: x[0])
 
-            for _, ticker, row in entry_candidates:
+            for _, ticker, row, conditions in entry_candidates:
                 if len(self.holdings) >= MAX_HOLDINGS:
                     break
                 curr      = float(row.get('Close', 0) or 0)
@@ -425,7 +443,7 @@ class PortfolioSimulator:
 
                 qty        = invest_amt / curr
                 stop_loss  = self._calc_stop_loss(row, curr)
-                self._execute_entry(ticker, curr, qty, stop_loss, date, currency)
+                self._execute_entry(ticker, curr, qty, stop_loss, date, currency, conditions)
 
         # ── 3. 일별 잔고 기록 ─────────────────────────────────────────────────
         self._record_daily(date, cache_map, fx_rate)
@@ -616,7 +634,7 @@ class PortfolioSimulator:
         return round((curr_price / (disp120 / 100.0)) * 0.92, 4)
 
     # ── 거래 집행 ─────────────────────────────────────────────────────────────
-    def _execute_entry(self, ticker, price, qty, stop_loss, date, currency):
+    def _execute_entry(self, ticker, price, qty, stop_loss, date, currency, conditions=None):
         invest = price * qty
         if currency == "KRW":
             self.cash_krw -= invest
@@ -624,14 +642,15 @@ class PortfolioSimulator:
             self.cash_usd -= invest
 
         self.holdings[ticker] = {
-            'ticker':        ticker,
-            'qty':           qty,
-            'avg_price':     price,
-            'entry_price':   price,
-            'entry_date':    date.strftime('%Y-%m-%d'),
-            'entry_stop':    stop_loss,
-            'trailing_high': price,
-            'currency':      currency,
+            'ticker':           ticker,
+            'qty':              qty,
+            'avg_price':        price,
+            'entry_price':      price,
+            'entry_date':       date.strftime('%Y-%m-%d'),
+            'entry_stop':       stop_loss,
+            'trailing_high':    price,
+            'currency':         currency,
+            'entry_conditions': ','.join(conditions) if conditions else '',
         }
         self.logger.debug(
             f"  ➡️  BUY  [{ticker}] {qty:.4f}주 @ {price:.2f} "
@@ -664,16 +683,18 @@ class PortfolioSimulator:
 
         # 완료 거래 기록
         self.closed_trades.append({
-            'Date':         date.strftime('%Y-%m-%d'),
-            'Ticker':       ticker,
-            'Exit_Reason':  reason,
-            'Entry_Price':  avg_price,
-            'Exit_Price':   price,
-            'Qty':          qty_sell,
-            'Profit':       round(profit, 4),
-            'Profit_Pct':   round(profit_p, 2),
-            'Hold_Days':    hold_days,
-            'Currency':     currency,
+            'Date':             date.strftime('%Y-%m-%d'),
+            'Ticker':           ticker,
+            'Exit_Reason':      reason,
+            'Entry_Date':       h.get('entry_date', ''),
+            'Entry_Conditions': h.get('entry_conditions', ''),
+            'Entry_Price':      avg_price,
+            'Exit_Price':       price,
+            'Qty':              qty_sell,
+            'Profit':           round(profit, 4),
+            'Profit_Pct':       round(profit_p, 2),
+            'Hold_Days':        hold_days,
+            'Currency':         currency,
         })
 
         self.logger.debug(
@@ -759,6 +780,79 @@ class PortfolioSimulator:
             'Holdings':      len(self.holdings),
         })
 
+    def _save_sim_ledger(self, cache_map: dict, path: str = None):
+        """
+        시뮬레이션 기간(SIM_START~SIM_END) 전 종목×전 날짜의 53컬럼 레저를 CSV로 저장.
+        sigma_guard_ledger 포맷과 컬럼 구조 동일 (SIM_LEDGER_COLS 참조).
+        """
+        path = path or os.path.join(RESULTS_DIR, "sim_ledger.csv")
+        rows = []
+        for ticker, df in cache_map.items():
+            sim_df = df[SIM_START:SIM_END]
+            for date, row in sim_df.iterrows():
+                rows.append({
+                    'Audit_Date':      date.strftime('%Y-%m-%d'),
+                    'Ticker':          ticker,
+                    'Name':            '',
+                    'Risk_Score':      row.get('Score',         np.nan),
+                    'Risk_Level':      row.get('Risk_Level',    np.nan),
+                    'Price_T':         row.get('Close',         np.nan),
+                    'Sigma_T_Avg':     row.get('avg_sigma',     np.nan),
+                    'Sigma_T_1y':      row.get('sig_1y',        np.nan),
+                    'Sigma_T_2y':      row.get('sig_2y',        np.nan),
+                    'Sigma_T_3y':      row.get('sig_3y',        np.nan),
+                    'Sigma_T_4y':      row.get('sig_4y',        np.nan),
+                    'Sigma_T_5y':      row.get('sig_5y',        np.nan),
+                    'RSI_T':           row.get('RSI',           np.nan),
+                    'MFI_T':           row.get('MFI',           np.nan),
+                    'BBW_T':           row.get('bbw',           np.nan),
+                    'R2_T':            row.get('R2',            np.nan),
+                    'ADX_T':           row.get('ADX',           np.nan),
+                    'Disp_T_120':      row.get('disp120',       np.nan),
+                    'Ticker_B':        '',
+                    'Price_B':         np.nan,
+                    'Sigma_B_Avg':     np.nan,
+                    'RSI_B':           np.nan,
+                    'MFI_B':           np.nan,
+                    'ADX_B':           np.nan,
+                    'BBW_B':           np.nan,
+                    'Stop_Price':      np.nan,
+                    'Risk_Gap_Pct':    np.nan,
+                    'Invest_EI':       np.nan,
+                    'Weight_Pct':      np.nan,
+                    'Expected_MDD':    np.nan,
+                    'Livermore_Status': np.nan,
+                    'Base_Raw_Score':  np.nan,
+                    'Risk_Multiplier': np.nan,
+                    'Trend_Scenario':  row.get('ma_slope',      ''),
+                    'Score_Pos':       row.get('p1',            np.nan),
+                    'Score_Pos_EMA':   np.nan,
+                    'Score_Ene':       row.get('p2',            np.nan),
+                    'Score_Ene_EMA':   np.nan,
+                    'Score_Trap':      row.get('p4',            np.nan),
+                    'Score_Trap_EMA':  np.nan,
+                    'VIX_T':           np.nan,
+                    'US10Y_T':         np.nan,
+                    'DXY_T':           np.nan,
+                    'MACD_Hist_T':     row.get('macd_h',        np.nan),
+                    'MACD_Hist_B':     np.nan,
+                    'ADX_Gap':         np.nan,
+                    'Disp_Limit':      row.get('disp120_limit', np.nan),
+                    'BBW_Thr':         row.get('bbw_thr',       np.nan),
+                    'LIV_Discount':    np.nan,
+                    'SOP_Action':      '',
+                    'Ret_20d':         np.nan,
+                    'Min_Ret_20d':     np.nan,
+                    'Max_Ret_20d':     np.nan,
+                })
+
+        if rows:
+            ledger_df = pd.DataFrame(rows, columns=SIM_LEDGER_COLS)
+            ledger_df.to_csv(path, index=False, encoding='utf-8')
+            self.logger.info(f"💾 sim_ledger 저장 완료: {path} ({len(rows)}행)")
+        else:
+            self.logger.warning("⚠️ sim_ledger 저장 건너뜀 — 데이터 없음")
+
     def _log_signal(self, date, ticker, signal, entry_p, exit_p, profit_p,
                     hold_days, ratio, reason):
         self.daily_log.append({
@@ -798,10 +892,11 @@ class PerformanceReporter:
         self.logger.addHandler(fh)
 
     # ── 공개 API ──────────────────────────────────────────────────────────────
-    def run(self, daily_path: str = None, trades_path: str = None):
+    def run(self, daily_path: str = None, trades_path: str = None, cache_map: dict = None):
         """
         :param daily_path:  일별 로그 CSV 경로 (None이면 기본 전체 경로 사용)
         :param trades_path: 완료 거래 CSV 경로 (None이면 기본 전체 경로 사용)
+        :param cache_map:   민감도 분석용 캐시맵 (None이면 민감도 분석 건너뜀)
         """
         daily_path  = daily_path  or os.path.join(RESULTS_DIR, "daily_log.csv")
         trades_path = trades_path or os.path.join(RESULTS_DIR, "closed_trades.csv")
@@ -821,7 +916,7 @@ class PerformanceReporter:
         self._print_portfolio_perf(daily_pf)
         self._print_trade_stats(trades)
         self._print_signal_analysis(trades)
-        self._print_sensitivity(trades)
+        self._print_sensitivity(trades, cache_map=cache_map)
 
     # ── 1. 포트폴리오 성과 ────────────────────────────────────────────────────
     def _print_portfolio_perf(self, daily_pf):
@@ -920,28 +1015,77 @@ class PerformanceReporter:
                 f"  {reason:<20} {cnt:>4}건 | 평균수익 {avg_p:+.2f}% | 승률 {win_r:.0f}%"
             )
 
+        # 진입 트리거 조건별 평균 수익률
+        self.logger.info("  [진입 트리거 조건별 평균 수익률]")
+        if 'Entry_Conditions' in sells.columns:
+            for cond_key, cond_label in [
+                ('B:', 'B(시그마 상승)'),
+                ('C:', 'C(MACD 반등)'),
+                ('D:', 'D(MFI 반등)'),
+                ('E:', 'E(점수 개선)'),
+            ]:
+                mask = sells['Entry_Conditions'].str.contains(cond_key, na=False)
+                grp  = sells[mask]
+                if not grp.empty:
+                    self.logger.info(
+                        f"    {cond_label:<16} {len(grp):>4}건 | "
+                        f"평균수익 {grp['Profit_Pct'].mean():+.2f}% | "
+                        f"승률 {(grp['Profit_Pct'] > 0).mean()*100:.0f}%"
+                    )
+        else:
+            self.logger.info("    Entry_Conditions 컬럼 없음 — 분석 건너뜀")
+
     # ── 4. ATR 파라미터 민감도 분석 ─────────────────────────────────────────
-    def _print_sensitivity(self, trades):
+    def _print_sensitivity(self, trades, cache_map=None):
         self.logger.info("━" * 70)
         self.logger.info("📊 [4/4] ATR 배수 & 진입 조건 파라미터 민감도 분석")
         self.logger.info("━" * 70)
-        self.logger.info("  ※ 민감도 분석은 PortfolioSimulator를 파라미터별로 재실행하여 비교하세요.")
-        self.logger.info("  기준 파라미터:")
-        self.logger.info(f"    ATR 배수: ×{PortfolioSimulator.ATR_LOW} / ×{PortfolioSimulator.ATR_MID} / ×{PortfolioSimulator.ATR_HIGH}")
-        self.logger.info(f"    진입 조건 충족 기준: {PortfolioSimulator.ENTRY_MIN_OPTIONAL}개 이상 (B~E 중)")
 
-        if trades.empty:
+        if cache_map is None:
+            self.logger.info("  ※ cache_map 미제공 — 민감도 분석 건너뜀")
             return
 
-        # 트레일링 유형별 수익률 비교
-        trail_mask = trades['Exit_Reason'].str.startswith('trail_', na=False)
-        if trail_mask.any():
-            self.logger.info("  [트레일링 등급별 평균 수익률]")
-            for reason, grp in trades[trail_mask].groupby('Exit_Reason'):
-                self.logger.info(
-                    f"    {reason:<20} {grp['Profit_Pct'].mean():+.2f}% "
-                    f"({len(grp)}건)"
-                )
+        configs = [
+            ("기본  (ATR×2/2.5/3, entry≥2)",   dict(atr_low=2.0, atr_mid=2.5, atr_high=3.0, entry_min=2)),
+            ("타이트(ATR×1.5/2/2.5, entry≥2)", dict(atr_low=1.5, atr_mid=2.0, atr_high=2.5, entry_min=2)),
+            ("루즈  (ATR×2.5/3/4, entry≥2)",    dict(atr_low=2.5, atr_mid=3.0, atr_high=4.0, entry_min=2)),
+            ("엄격진입(ATR×2/2.5/3, entry≥3)",  dict(atr_low=2.0, atr_mid=2.5, atr_high=3.0, entry_min=3)),
+        ]
+
+        all_dates = sorted(set(
+            d for df in cache_map.values()
+            for d in df[SIM_START:SIM_END].index
+        ))
+
+        self.logger.info(
+            f"  {'설정':<36} {'거래':>5} {'승률':>6} {'평균수익':>9} {'손익비':>7}"
+        )
+        self.logger.info(f"  {'─'*36} {'─'*5} {'─'*6} {'─'*9} {'─'*7}")
+
+        for label, params in configs:
+            sim = PortfolioSimulator(**params)
+            for date in all_dates:
+                sim._process_day(date, cache_map)
+
+            ct = sim.closed_trades
+            if not ct:
+                self.logger.info(f"  {label:<36}   0건  —  거래 없음")
+                continue
+
+            ct_df  = pd.DataFrame(ct)
+            sells  = ct_df[ct_df['Exit_Price'].notna() & (ct_df['Exit_Price'] > 0)]
+            total  = len(sells)
+            win_r  = (sells['Profit_Pct'] > 0).mean() * 100 if total > 0 else 0.0
+            avg_p  = sells['Profit_Pct'].mean()           if total > 0 else 0.0
+            wins   = sells[sells['Profit_Pct'] > 0]
+            losses = sells[sells['Profit_Pct'] < 0]
+            avg_win  = wins['Profit_Pct'].mean()   if not wins.empty   else 0.0
+            avg_loss = losses['Profit_Pct'].mean() if not losses.empty else 0.0
+            pl_ratio = abs(avg_win / avg_loss)     if avg_loss != 0    else float('inf')
+
+            self.logger.info(
+                f"  {label:<36} {total:>5}건 {win_r:>5.0f}% {avg_p:>+9.2f}% {pl_ratio:>7.2f}"
+            )
 
     # ── 수학 유틸 ─────────────────────────────────────────────────────────────
     @staticmethod
@@ -1090,10 +1234,12 @@ if __name__ == "__main__":
             sim._process_day(date, cache_map_single)
 
         # 단독 종목 전용 결과 파일 경로
-        log_path_single    = os.path.join(RESULTS_DIR, f"daily_log_{safe_name}.csv")
-        trades_path_single = os.path.join(RESULTS_DIR, f"closed_trades_{safe_name}.csv")
+        log_path_single     = os.path.join(RESULTS_DIR, f"daily_log_{safe_name}.csv")
+        trades_path_single  = os.path.join(RESULTS_DIR, f"closed_trades_{safe_name}.csv")
+        ledger_path_single  = os.path.join(RESULTS_DIR, f"sim_ledger_{safe_name}.csv")
         pd.DataFrame(sim.daily_log).to_csv(log_path_single, index=False, encoding='utf-8')
         pd.DataFrame(sim.closed_trades).to_csv(trades_path_single, index=False, encoding='utf-8')
+        sim._save_sim_ledger(cache_map_single, path=ledger_path_single)
 
         # 최종 잔고: 일별 스냅샷의 마지막 행 (미청산 포지션 포함)
         snap_rows = [r for r in sim.daily_log if r.get('Portfolio_KRW') is not None]
@@ -1118,6 +1264,7 @@ if __name__ == "__main__":
         reporter.run(
             daily_path  = log_path_single,
             trades_path = trades_path_single,
+            cache_map   = cache_map_single,
         )
 
         print(f"\n✅ [{ticker_test}] Step 1~3 전체 완료", flush=True)

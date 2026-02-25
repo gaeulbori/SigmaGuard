@@ -217,4 +217,26 @@ class LedgerHandler:
                 'p2_ema': last.get('Score_Ene_EMA', last.get('Score_Ene', 0)),
                 'p4_ema': last.get('Score_Trap_EMA', last.get('Score_Trap', 0))
             }
-        except Exception: return None        
+        except Exception: return None
+
+    def get_recent_scores(self, ticker, current_market_date, n=3):
+        """최근 n일치 리스크 점수 이력 반환 (오래된 순) — 연속 상승 판정용
+
+        반환: [score_oldest, ..., score_newest] (current_market_date 제외)
+        이력 부족 시 가용한 만큼만 반환 (빈 리스트도 가능).
+        """
+        file_path = self._get_file_path(ticker)
+        if not file_path.exists():
+            return []
+        try:
+            df = pd.read_csv(file_path)
+            if df.empty:
+                return []
+            # current_market_date 이전 데이터 중 최신 n건 (오래된 순 반환)
+            past_df = df[df['Audit_Date'] < current_market_date]
+            if past_df.empty:
+                return []
+            recent = past_df.tail(n)
+            return [float(s) for s in recent['Risk_Score'].tolist()]
+        except Exception:
+            return []

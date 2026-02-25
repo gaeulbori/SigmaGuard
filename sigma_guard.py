@@ -17,6 +17,7 @@ from core.indicators import Indicators
 from core.risk_engine import RiskEngine
 from core.sigma_analyzer import SigmaAnalyzer
 from core.db_handler import DBHandler          # [v10.3.0 추가] SQLite 핸들러
+from core.entry_exit_engine import EntryExitEngine  # [신규] 진입/청산 신호 엔진
 from data.ledgers.ledger_handler import LedgerHandler
 from utils.messenger import TelegramMessenger
 from utils.logger import setup_custom_logger
@@ -41,6 +42,7 @@ class SigmaGuard:
         self.indicators = Indicators()
         self.risk_engine = RiskEngine()
         self.ledger = LedgerHandler()
+        self.ee_engine = EntryExitEngine(db=self.db)  # [신규] 진입/청산 신호 엔진 (DB 연동)
         
         # [v10.3.0 수정] 분석기에 DB 핸들러 주입 (실전 성과 분석용)
         self.analyzer = SigmaAnalyzer(self.db, settings.DATA_DIR)
@@ -72,7 +74,7 @@ class SigmaGuard:
 
             if ind_df is None or len(ind_df) < 120:
                 logger.error(f"   - [{ticker}] {name}: 분석 최소 기준 미달")
-                return None
+                return None, None
 
             latest = ind_df.iloc[-1]
             market_date = ind_df.index[-1].strftime('%Y-%m-%d')
@@ -117,24 +119,25 @@ class SigmaGuard:
             )
             
             return {
-                "ticker": ticker,
-                "name": name,
-                "price": latest.get('Close', 0.0),
-                "score": score,
-                "prev_score": prev_score,
+                "ticker":      ticker,
+                "name":        name,
+                "market_date": market_date,
+                "price":       latest.get('Close', 0.0),
+                "score":       score,
+                "prev_score":  prev_score,
                 "action_text": details.get('action', '관망'),
-                "liv_status": details.get('liv_status', 'N/A'),
-                "disp": latest.get('disp120', 100.0),
-                "ei": alloc.get('ei', 0.0),
-                "stop": alloc.get('stop_loss', 0.0),
-                "weight": alloc.get('weight', 0.0)
-            }
+                "liv_status":  details.get('liv_status', 'N/A'),
+                "disp":        latest.get('disp120', 100.0),
+                "ei":          alloc.get('ei', 0.0),
+                "stop":        alloc.get('stop_loss', 0.0),
+                "weight":      alloc.get('weight', 0.0)
+            }, ind_df  # ind_df를 함께 반환하여 진입/청산 신호 엔진에서 활용
 
         except Exception as e:
             logger.error(f"❌ [{ticker}] 감사 중 치명적 오류: {e}")
             import traceback
             logger.debug(traceback.format_exc())
-            return None
+            return None, None
 
     def execute_all_prev(self):
         watchlist = settings.watchlist
@@ -144,7 +147,7 @@ class SigmaGuard:
         macro_snapshot = self.ledger._get_macro_snapshot() or {}
 
         for item in watchlist:
-            audit_data = self.run_audit(item, macro_snapshot)
+            audit_data, _ = self.run_audit(item, macro_snapshot)
             if audit_data:
                 audit_results_summary.append(audit_data)
                 msg = self.reporter.build_delta_alert_msg(audit_data)
@@ -248,6 +251,151 @@ class SigmaGuard:
         self.messenger.send_smart_message(final_msg)
         self.logger.info("🏁 테스트 메시지가 텔레그램으로 발송되었습니다.")
 
+    """
+    [Program Explanation] test_entry_exit_pipeline
+    1. Mock ind_df 주입: 실제 yfinance 호출 없이 각 신호가 확실히 발동되는 경계값 데이터를 생성합니다.
+    2. EntryExitEngine 직접 호출: execute_all() 과 동일한 신호 감지 흐름을 재현합니다.
+    3. 실제 텔레그램 발송: send_smart_message() 를 통해 실제 수신 여부를 검증합니다.
+    """
+
+    def test_entry_exit_pipeline(self):
+        """[David's Diagnostic Mode] 진입/청산 신호 파이프라인 실제 텔레그램 발송 검증"""
+        self.logger.info("🧪 EntryExitEngine 파이프라인 테스트 시작 (Mock Data 주입)")
+
+        signal_msgs = []
+
+        # ─────────────────────────────────────────────────────────────
+        # 케이스 1: UNH — 진입 트리거 (전 조건 발동 Mock)
+        # ─────────────────────────────────────────────────────────────
+        self.logger.info("  [1/3] UNH 진입 트리거 Mock 생성 중...")
+
+        # B: avg_sigma 상승, C: macd_h 음수 구간 반등, D: MFI 과매도 반등 → 조건 B·C·D 충족
+        unh_ind_df = pd.DataFrame([
+            {'avg_sigma': 0.3,  'macd_h': -0.50, 'MFI': 25.0},  # T-2
+            {'avg_sigma': 0.4,  'macd_h': -0.40, 'MFI': 35.0},  # T-1 (prev)
+            {'avg_sigma': 0.6,  'macd_h': -0.10, 'MFI': 43.0},  # T   (latest)
+        ])
+        unh_score      = 20.0   # 레벨 3 (조건 A 충족)
+        unh_prev_score = 40.0   # 직전 점수 > 현재 점수 (조건 E 충족)
+        unh_weight     = 15.0
+
+        is_entry, conditions = self.ee_engine.check_entry_trigger(
+            ticker='UNH', score=unh_score, details={},
+            ind_df=unh_ind_df, prev_score=unh_prev_score
+        )
+        if is_entry:
+            cond_str = "\n  - ".join(conditions)
+            signal_msgs.append(
+                f"📡 <b>[UNH] 진입 검토</b>\n"
+                f"충족 조건:\n  - {cond_str}\n"
+                f"현재 점수: {unh_score:.1f}\n"
+                f"권고 비중: {unh_weight:.1f}%"
+            )
+            self.logger.info(f"     ✅ 진입 트리거 발동 (충족 조건 {len(conditions)}개)")
+        else:
+            self.logger.warning("     ⚠️ 진입 트리거 미발동 — Mock 데이터 점검 필요")
+
+        # ─────────────────────────────────────────────────────────────
+        # 케이스 2: B (Barrick) — 트레일링 스탑 2단계 🟠 발동 Mock
+        # avg=28.5, current=37.05(+30%), trailing_high=42.0
+        # ATR=1.5, mult=2.5(20~50%) → stop=42.0-3.75=38.25 → current(37.05)<38.25 → 축1 True
+        # score=68(≥61), score_history=[55,62] → 55<62<68 → 축2 True
+        # axis3: MFI(42)<RSI(58) ✅ / MACD 연속감소 ✅ / ADX 유지 ⛔ → 2/3 → 축3 True → grade=3
+        # ─────────────────────────────────────────────────────────────
+        self.logger.info("  [2/3] B(Barrick) 트레일링 스탑 Mock 생성 중...")
+
+        b_avg_price     = 28.5
+        b_current_price = round(b_avg_price * 1.30, 2)   # +30.0% → $37.05
+
+        # ind_df: ATR=1.5, 축3 수급 약화 조건 충족 (3행 필요)
+        b_ind_df = pd.DataFrame([
+            {'atr': 1.5, 'MFI': 45.0, 'RSI': 56.0, 'macd_h': 0.30, 'ADX': 22.0},  # T-2
+            {'atr': 1.5, 'MFI': 43.0, 'RSI': 57.0, 'macd_h': 0.15, 'ADX': 21.0},  # T-1
+            {'atr': 1.5, 'MFI': 42.0, 'RSI': 58.0, 'macd_h': 0.05, 'ADX': 21.0},  # T
+        ])
+
+        b_holding = {
+            'ticker':        'B',
+            'qty':           6000,
+            'avg_price':     b_avg_price,
+            'entry_stop':    round(b_avg_price * 0.90, 2),
+            'last_updated':  '2025-08-01',
+            'trailing_high': 42.0,   # 이전 고점 (DB 저장값 시뮬레이션)
+        }
+
+        b_score         = 68.0          # 레벨 7 (≥ 61 → 축2 조건 충족)
+        b_score_history = [55.0, 62.0]  # 55 < 62 < 68 → 3일 연속 상승 → 축2 True
+
+        grade, profit_pct, details = self.ee_engine.check_trailing_stop(
+            holding=b_holding, current_price=b_current_price, ind_df=b_ind_df,
+            score=b_score, score_history=b_score_history
+        )
+        if grade >= 2:
+            ax1 = '✅' if details.get('axis1') else '⛔'
+            ax2 = '✅' if details.get('axis2') else '⛔'
+            ax3 = '✅' if details.get('axis3') else '⛔'
+            grade_emoji = {2: '🟠', 3: '🔴'}.get(grade, '🟠')
+            signal_msgs.append(
+                f"{grade_emoji} <b>[B] 트레일링 스탑 {grade}단계</b>\n"
+                f"수익률: {profit_pct:+.1f}%  |  ATR배수: {details.get('atr_mult')}x\n"
+                f"고점: ${details.get('trailing_high', 0):.2f}  |  "
+                f"스탑가: ${details.get('trail_stop_price', 0):.2f}\n"
+                f"축1(가격): {ax1}  축2(점수): {ax2}  축3(수급): {ax3}\n"
+                f"⚡ 권고 매도비율: {details.get('sell_ratio', 0)*100:.0f}%"
+            )
+            self.logger.info(f"     ✅ 트레일링 스탑 {grade}단계 발동 (수익 {profit_pct:+.1f}%)")
+        elif grade == 1:
+            self.logger.info(f"     🟡 트레일링 스탑 1단계 관찰 (수익 {profit_pct:+.1f}%)")
+        else:
+            self.logger.warning("     ⚠️ 트레일링 스탑 미발동 — Mock 데이터 점검 필요")
+
+        # ─────────────────────────────────────────────────────────────
+        # 케이스 3: SOXL — 시간 기반 청산 (90일 초과, 수익 +2%)
+        # ─────────────────────────────────────────────────────────────
+        self.logger.info("  [3/3] SOXL 시간 기반 청산 Mock 생성 중...")
+
+        soxl_avg_price     = 45.0
+        soxl_current_price = round(soxl_avg_price * 1.02, 2)   # +2.0% → $45.9
+        # 95일 전 진입 가정 → T+90 기회비용 조건 발동
+        soxl_entry_date = (datetime.now() - pd.Timedelta(days=95)).strftime('%Y-%m-%d')
+
+        soxl_holding = {
+            'ticker':       'SOXL',
+            'qty':          100,
+            'avg_price':    soxl_avg_price,
+            'entry_stop':   soxl_avg_price * 0.90,
+            'last_updated': soxl_entry_date
+        }
+
+        exit_signal = self.ee_engine.check_time_based_exit(
+            holding=soxl_holding, current_price=soxl_current_price
+        )
+        if exit_signal:
+            signal_msgs.append(
+                f"⏰ <b>[SOXL] 시간 초과 청산 검토</b>\n"
+                f"보유 기간: {exit_signal['elapsed_days']}일\n"
+                f"현재 수익률: {exit_signal['profit_pct']:+.1f}%\n"
+                f"사유: {exit_signal['reason']}"
+            )
+            self.logger.info(f"     ✅ 시간 청산 발동 ({exit_signal['reason']}, "
+                             f"{exit_signal['elapsed_days']}일, {exit_signal['profit_pct']:+.1f}%)")
+        else:
+            self.logger.warning("     ⚠️ 시간 청산 미발동 — Mock 데이터 점검 필요")
+
+        # ─────────────────────────────────────────────────────────────
+        # 텔레그램 발송
+        # ─────────────────────────────────────────────────────────────
+        if signal_msgs:
+            header = (
+                f"🧪 <b>[TEST] 매매 신호 파이프라인 검증</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Mock 데이터로 3개 케이스 강제 발동 결과:\n\n"
+            )
+            self.messenger.send_smart_message(header + "\n\n".join(signal_msgs))
+            self.logger.info(f"🏁 신호 {len(signal_msgs)}건 텔레그램 발송 완료")
+        else:
+            self.logger.error("❌ 신호 0건 — Mock 데이터 또는 엔진 로직 점검 필요")
+
     def execute_all(self):
         """[v10.3.0 핵심 로직] 감시 종목과 보유 종목 통합 감사 실행"""
         # 1. 데이터 로드: Watchlist(YAML) + Holdings(DB)
@@ -271,14 +419,17 @@ class SigmaGuard:
                 })                
 
         audit_results_summary = {}
+        ind_cache = {}  # [신규] 티커별 ind_df 캐시 (진입/청산 신호 감지용)
         new_stocks, risk_up, risk_down = [], [], []
-        macro_snapshot = self.ledger._get_macro_snapshot() or {}           
+        macro_snapshot = self.ledger._get_macro_snapshot() or {}
 
         # 2. 전수 조사 실행
         for item in total_audit_list:
-            audit_data = self.run_audit(item, macro_snapshot)
+            audit_data, ind_df = self.run_audit(item, macro_snapshot)
             if audit_data:
-                audit_results_summary[audit_data['ticker']] = audit_data
+                ticker = audit_data['ticker']
+                audit_results_summary[ticker] = audit_data
+                ind_cache[ticker] = ind_df  # [신규] ind_df 캐시 저장
                 # 델타 알림 메시지 생성 및 분류
                 msg = self.reporter.build_delta_alert_msg(audit_data)
                 if msg:
@@ -290,24 +441,129 @@ class SigmaGuard:
         # 3. 리포트 출력 및 발송
         # (1) 터미널: 감시 종목 요약표
         self.reporter.print_audit_summary_table(list(audit_results_summary.values()))
-        
+
         # (2) [v10.3.0] 터미널: David's Fortress 실전 자산 리포트
         total_capital = self.sys_settings.get('total_capital', 500000000)
-        # 1. 실시간 다중 환율 수급
-        exchange_rates = self.indicators.get_exchange_rates()        
+        # 실시간 다중 환율 수급
+        exchange_rates = self.indicators.get_exchange_rates()
         self.reporter.print_fortress_report(holdings, audit_results_summary, total_capital, self.risk_engine, exchange_rates)
 
-        # (3) 텔레그램: 스마트 메시지 발송
+        # (3) 텔레그램: 델타 알림 발송
         delta_body = self.reporter.assemble_delta_alerts(new_stocks, risk_up, risk_down)
         if delta_body:
             self.messenger.send_smart_message(delta_body)
-        
-        # 4. 성과 분석 자동 호출
+
+        # [신규] 4. 진입/청산 신호 감지 및 텔레그램 발송
+        signal_msgs  = []   # 진입트리거 · 시간청산 · 트레일링 1단계
+        trail_action = []   # 트레일링 2~3단계 (별도 강조 발송)
+
+        # 4-1. 진입 트리거: 감사 완료 종목 전체 대상
+        # yaml_watchlist + holdings-only 티커 모두 포함 (total_audit_list 기준)
+        # → DB에만 있는 보유 종목의 추가매수 신호도 놓치지 않음
+        entry_checked = set()  # 중복 체크 방지
+        for ticker, audit_data in audit_results_summary.items():
+            if ticker in entry_checked:
+                continue
+            entry_checked.add(ticker)
+            is_entry, conditions = self.ee_engine.check_entry_trigger(
+                ticker=ticker,
+                score=audit_data['score'],
+                details={},
+                ind_df=ind_cache.get(ticker),
+                prev_score=audit_data.get('prev_score')
+            )
+            if is_entry:
+                cond_str = "\n  - ".join(conditions)
+                signal_msgs.append(
+                    f"📡 <b>[{ticker}] 진입 검토</b>\n"
+                    f"충족 조건:\n  - {cond_str}\n"
+                    f"현재 점수: {audit_data['score']:.1f}\n"
+                    f"권고 비중: {audit_data.get('weight', 0.0):.1f}%"
+                )
+
+        # 4-2. 트레일링 스탑 & 시간 청산: 보유 종목 대상
+        # check_trailing_stop() 내부에서 수익 +5% 이상 종목의 trailing_high 자동 갱신
+        for holding in holdings:
+            ticker = holding['ticker']
+            if ticker not in audit_results_summary:
+                continue
+            audit_data    = audit_results_summary[ticker]
+            current_price = audit_data.get('price', 0.0)
+            ind_df        = ind_cache.get(ticker)
+            score         = audit_data.get('score')
+            market_date   = audit_data.get('market_date', datetime.now().strftime('%Y-%m-%d'))
+
+            # 최근 2일 점수 이력 (oldest→newest) + 현재 score = 3일치 연속 상승 판정용
+            score_history = self.ledger.get_recent_scores(ticker, market_date, n=2)
+
+            # 트레일링 스탑 검사 (ATR 다축 등급)
+            grade, profit_pct, details = self.ee_engine.check_trailing_stop(
+                holding, current_price, ind_df,
+                score=score, score_history=score_history
+            )
+
+            if grade >= 1:
+                ax1 = '✅' if details.get('axis1') else '⛔'
+                ax2 = '✅' if details.get('axis2') else '⛔'
+                ax3 = '✅' if details.get('axis3') else '⛔'
+                atr_mult   = details.get('atr_mult', 0)
+                trail_hi   = details.get('trailing_high', 0)
+                stop_price = details.get('trail_stop_price', 0)
+                grade_emoji = {1: '🟡', 2: '🟠', 3: '🔴'}[grade]
+                grade_text  = {1: '1단계 관찰', 2: '2단계 분할청산', 3: '3단계 전량청산'}[grade]
+
+                msg = (
+                    f"{grade_emoji} <b>[{ticker}] 트레일링 스탑 {grade_text}</b>\n"
+                    f"  수익률: {profit_pct:+.1f}%  |  ATR배수: {atr_mult}x\n"
+                    f"  고점: ${trail_hi:.2f}  |  스탑가: ${stop_price:.2f}\n"
+                    f"  축1(가격): {ax1}  축2(점수): {ax2}  축3(수급): {ax3}"
+                )
+                if grade >= 2:
+                    sell_pct = details.get('sell_ratio', 0) * 100
+                    msg += f"\n  ⚡ 권고 매도비율: {sell_pct:.0f}%"
+                    trail_action.append(msg)
+                else:
+                    signal_msgs.append(msg)
+
+            # 시간 기반 청산 검사
+            exit_signal = self.ee_engine.check_time_based_exit(holding, current_price)
+            if exit_signal:
+                signal_msgs.append(
+                    f"⏰ <b>[{ticker}] 시간 초과 청산 검토</b>\n"
+                    f"  보유 기간: {exit_signal['elapsed_days']}일\n"
+                    f"  현재 수익률: {exit_signal['profit_pct']:+.1f}%\n"
+                    f"  사유: {exit_signal['reason']}"
+                )
+
+        # 4-3. 신호 발송
+        # (A) 트레일링 2~3단계 — 별도 강조 발송
+        if trail_action:
+            action_header = (
+                f"🚨 <b>[긴급 매도 신호]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+            )
+            self.messenger.send_smart_message(action_header + "\n\n".join(trail_action))
+            logger.info(f"🚨 트레일링 스탑 2~3단계 {len(trail_action)}건 긴급 발송")
+
+        # (B) 진입트리거 · 시간청산 · 트레일링 1단계 통합 발송
+        if signal_msgs:
+            header = (
+                f"🎯 <b>[매매 신호 감지]</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+            )
+            self.messenger.send_smart_message(header + "\n\n".join(signal_msgs))
+            logger.info(f"📡 매매 신호 {len(signal_msgs)}건 발송 완료")
+
+        if not trail_action and not signal_msgs:
+            logger.info("✅ 매매 신호 없음 (진입/청산 조건 미충족)")
+
+        # 5. 성과 분석 자동 호출
         self.analyzer.run_performance_audit()
         logger.info("📊 시스템 예측력 검증 완료")
 
 # 메인 실행부에서 테스트 모드 호출
 if __name__ == "__main__":
     app = SigmaGuard()
-    app.execute_all()  # 실제 운용 시
-    #app.test_messaging_pipeline() # 텔레그램 테스트 시
+    app.execute_all()               # 실제 운용 시
+    #app.test_messaging_pipeline()  # 텔레그램 델타/대시보드 테스트 시
+    #app.test_entry_exit_pipeline() # 매매 신호(진입/트레일링/시간청산) 테스트 시

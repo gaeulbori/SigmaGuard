@@ -102,8 +102,9 @@ class Indicators:
         df['disp120_limit'], df['disp120_avg'] = self.calc_dynamic_disparity_limit(df)
         df['slope'] = self.calc_relative_slope(df, self.P_R2)
         
-        # 5. 리스크 엔진 연동용 트렌드 지표
+        # 5. 리스크 엔진 연동용 트렌드 지표 및 ATR
         df['macd_h'], df['m_trend'] = self.calc_macd_trend(df)
+        df['atr'] = self.calc_atr(df, self.P_ADX)  # ATR-14 (트레일링 스탑 배수용)
         df['ma_slope'] = np.where(
             df['Close'].rolling(self.P_DISP).mean() > df['Close'].rolling(self.P_DISP).mean().shift(5), 
             "Rising", "Falling"
@@ -213,6 +214,15 @@ class Indicators:
     def calc_disparity(self, df, period):
         sma = df['Close'].rolling(window=period).mean()
         return (df['Close'] / (sma + 1e-10)) * 100
+
+    def calc_atr(self, df, period=14):
+        """[ATR] Average True Range 산출 — 트레일링 스탑 ATR 배수 계산에 활용
+        TR = max(High-Low, |High-PrevClose|, |Low-PrevClose|)
+        ATR = TR의 period일 이동평균
+        """
+        h, l, c = df['High'], df['Low'], df['Close']
+        tr = pd.concat([h-l, (h-c.shift(1)).abs(), (l-c.shift(1)).abs()], axis=1).max(axis=1)
+        return tr.rolling(window=period).mean()
 
     def calc_adx(self, df, period):
         h, l, c = df['High'], df['Low'], df['Close']

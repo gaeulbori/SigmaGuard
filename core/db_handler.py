@@ -7,7 +7,10 @@
 import sqlite3
 import os
 import threading
+import logging
 from datetime import datetime
+
+_logger = logging.getLogger("DBHandler")
 
 class DBHandler:
     def __init__(self, db_path="data/db/sg_fortress.db"):
@@ -24,14 +27,30 @@ class DBHandler:
             cursor = self.conn.cursor()
             cursor.execute('''CREATE TABLE IF NOT EXISTS holdings (
                 ticker TEXT PRIMARY KEY, qty REAL DEFAULT 0, avg_price REAL DEFAULT 0,
-                entry_stop REAL, last_updated TEXT
+                entry_stop REAL, last_updated TEXT,
+                trailing_high REAL DEFAULT 0, trailing_stop REAL DEFAULT 0
             )''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, ticker TEXT, type TEXT,
                 qty REAL, price REAL, fee REAL, total_amount REAL,
                 profit REAL DEFAULT 0, profit_percent REAL DEFAULT 0, trade_date TEXT, status TEXT
             )''')
+            # 기존 DB 마이그레이션 (trailing 컬럼이 없는 구버전 대응)
+            self._migrate_holdings_table(cursor)
             self.conn.commit()
+
+    def _migrate_holdings_table(self, cursor):
+        """[마이그레이션] holdings 테이블에 trailing_high / trailing_stop 컬럼 추가."""
+        cursor.execute("PRAGMA table_info(holdings)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+
+        if 'trailing_high' not in existing_cols:
+            cursor.execute("ALTER TABLE holdings ADD COLUMN trailing_high REAL DEFAULT 0")
+            _logger.info("🔧 DB 마이그레이션: holdings.trailing_high 컬럼 추가 완료")
+
+        if 'trailing_stop' not in existing_cols:
+            cursor.execute("ALTER TABLE holdings ADD COLUMN trailing_stop REAL DEFAULT 0")
+            _logger.info("🔧 DB 마이그레이션: holdings.trailing_stop 컬럼 추가 완료")
 
     def record_buy(self, ticker, qty, price, stop_loss, date=None):
         trade_date = date or datetime.now().strftime('%Y-%m-%d')
@@ -111,6 +130,58 @@ class DBHandler:
         if old_qty + new_qty == 0: return 0
         return ((old_qty * old_avg) + (new_qty * new_price)) / (old_qty + new_qty)
 
+    def update_trailing_high(self, ticker, new_high, new_stop):
+        """
+        [트레일링 고점 및 스탑 DB 갱신]
+        - trailing_high : max(new_high, 기존값) — 단방향 상승만 허용
+        - trailing_stop : new_stop > 기존값일 때만 갱신 (스탑은 올리기만 함)
+        - entry_stop    : 절대 수정하지 않음
+        반환: (True, 적용된_trailing_stop) 또는 (False, 오류메시지)
+        """
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "SELECT trailing_high, trailing_stop FROM holdings WHERE ticker = ?",
+                    (ticker,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return False, f"[{ticker}] holdings에 존재하지 않는 종목입니다."
+
+                curr_trail_high = row[0] or 0.0
+                curr_trail_stop = row[1] or 0.0
+
+                # trailing_high: 단방향 상승 (최고점만 갱신)
+                updated_high = max(new_high, curr_trail_high)
+
+                if new_stop > curr_trail_stop:
+                    # trailing_stop 상향: 두 필드 동시 갱신
+                    cursor.execute(
+                        "UPDATE holdings SET trailing_high = ?, trailing_stop = ? WHERE ticker = ?",
+                        (updated_high, new_stop, ticker)
+                    )
+                    self.conn.commit()
+                    _logger.info(
+                        f"📈 [{ticker}] 트레일링 갱신: "
+                        f"high=${updated_high:.2f}, stop=${new_stop:.2f}"
+                    )
+                    return True, new_stop
+                else:
+                    # trailing_stop 유지, trailing_high만 갱신 (가격이 오른 경우)
+                    if updated_high > curr_trail_high:
+                        cursor.execute(
+                            "UPDATE holdings SET trailing_high = ? WHERE ticker = ?",
+                            (updated_high, ticker)
+                        )
+                        self.conn.commit()
+                    return True, curr_trail_stop
+
+            except Exception as e:
+                self.conn.rollback()
+                _logger.error(f"❌ [{ticker}] update_trailing_high 오류: {e}")
+                return False, str(e)
+
     def get_all_trades(self):
         """저장된 모든 매매 이력을 최신순으로 가져옵니다."""
         with self.lock:
@@ -121,8 +192,7 @@ class DBHandler:
                 rows = cursor.fetchall()
                 return [dict(zip(columns, row)) for row in rows]
             except Exception as e:
-                import logging
-                logging.getLogger("DBHandler").error(f"trades 조회 오류: {e}")
+                _logger.error(f"trades 조회 오류: {e}")
                 return []
 
     def get_all_holdings(self):
@@ -135,6 +205,5 @@ class DBHandler:
                 rows = cursor.fetchall()
                 return [dict(zip(columns, row)) for row in rows]
             except Exception as e:
-                import logging
-                logging.getLogger("DBHandler").error(f"holdings 조회 오류: {e}")
-                return []    
+                _logger.error(f"holdings 조회 오류: {e}")
+                return []

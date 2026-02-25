@@ -100,7 +100,7 @@ class PreComputeEngine:
     IND_COLS = [
         'Close', 'avg_sigma', 'RSI', 'MFI', 'ADX', 'R2',
         'bbw', 'bbw_thr', 'macd_h', 'atr',
-        'disp120', 'disp120_limit', 'slope', 'ma_slope',
+        'disp120', 'disp120_limit', 'disp120_avg', 'slope', 'ma_slope',
         'sig_1y', 'sig_2y', 'sig_3y', 'sig_4y', 'sig_5y',
     ]
 
@@ -203,11 +203,17 @@ class PreComputeEngine:
                 for col in self.IND_COLS:
                     record[col] = row.get(col, np.nan) if hasattr(row, 'get') else getattr(row, col, np.nan)
 
-                record['Score']      = round(float(score), 2)
-                record['Risk_Level'] = int(level)
-                record['p1']         = round(float(details.get('p1', 0)), 2) if details else 0.0
-                record['p2']         = round(float(details.get('p2', 0)), 2) if details else 0.0
-                record['p4']         = round(float(details.get('p4', 0)), 2) if details else 0.0
+                record['Score']        = round(float(score), 2)
+                record['Risk_Level']   = int(level)
+                record['p1']           = round(float(details.get('p1',      0)),    2) if details else 0.0
+                record['p2']           = round(float(details.get('p2',      0)),    2) if details else 0.0
+                record['p4']           = round(float(details.get('p4',      0)),    2) if details else 0.0
+                record['p1_ema']       = round(float(details.get('p1_ema',  0)),    2) if details else 0.0
+                record['p2_ema']       = round(float(details.get('p2_ema',  0)),    2) if details else 0.0
+                record['p4_ema']       = round(float(details.get('p4_ema',  0)),    2) if details else 0.0
+                record['scenario']     = details.get('scenario',     '')                if details else ''
+                record['liv_discount'] = round(float(details.get('liv_discount', 0)), 4) if details else 0.0
+                record['sop_action']   = details.get('action',       '')                if details else ''
                 results.append(record)
 
             if not results:
@@ -824,13 +830,13 @@ class PortfolioSimulator:
                     'Livermore_Status': np.nan,
                     'Base_Raw_Score':  np.nan,
                     'Risk_Multiplier': np.nan,
-                    'Trend_Scenario':  row.get('ma_slope',      ''),
+                    'Trend_Scenario':  row.get('scenario',      row.get('ma_slope', '')),
                     'Score_Pos':       row.get('p1',            np.nan),
-                    'Score_Pos_EMA':   np.nan,
+                    'Score_Pos_EMA':   row.get('p1_ema',        np.nan),
                     'Score_Ene':       row.get('p2',            np.nan),
-                    'Score_Ene_EMA':   np.nan,
+                    'Score_Ene_EMA':   row.get('p2_ema',        np.nan),
                     'Score_Trap':      row.get('p4',            np.nan),
-                    'Score_Trap_EMA':  np.nan,
+                    'Score_Trap_EMA':  row.get('p4_ema',        np.nan),
                     'VIX_T':           np.nan,
                     'US10Y_T':         np.nan,
                     'DXY_T':           np.nan,
@@ -839,8 +845,8 @@ class PortfolioSimulator:
                     'ADX_Gap':         np.nan,
                     'Disp_Limit':      row.get('disp120_limit', np.nan),
                     'BBW_Thr':         row.get('bbw_thr',       np.nan),
-                    'LIV_Discount':    np.nan,
-                    'SOP_Action':      '',
+                    'LIV_Discount':    row.get('liv_discount',  np.nan),
+                    'SOP_Action':      row.get('sop_action',    ''),
                     'Ret_20d':         np.nan,
                     'Min_Ret_20d':     np.nan,
                     'Max_Ret_20d':     np.nan,
@@ -1183,11 +1189,17 @@ if __name__ == "__main__":
             for col in PreComputeEngine.IND_COLS:
                 r[col] = row_val.get(col, np.nan) if hasattr(row_val, 'get') else np.nan
             r.update({
-                'Score':      round(float(score), 2),
-                'Risk_Level': int(level),
-                'p1': round(float(details.get('p1', 0)), 2) if details else 0.0,
-                'p2': round(float(details.get('p2', 0)), 2) if details else 0.0,
-                'p4': round(float(details.get('p4', 0)), 2) if details else 0.0,
+                'Score':        round(float(score), 2),
+                'Risk_Level':   int(level),
+                'p1':           round(float(details.get('p1',      0)),    2) if details else 0.0,
+                'p2':           round(float(details.get('p2',      0)),    2) if details else 0.0,
+                'p4':           round(float(details.get('p4',      0)),    2) if details else 0.0,
+                'p1_ema':       round(float(details.get('p1_ema',  0)),    2) if details else 0.0,
+                'p2_ema':       round(float(details.get('p2_ema',  0)),    2) if details else 0.0,
+                'p4_ema':       round(float(details.get('p4_ema',  0)),    2) if details else 0.0,
+                'scenario':     details.get('scenario',     '')                if details else '',
+                'liv_discount': round(float(details.get('liv_discount', 0)), 4) if details else 0.0,
+                'sop_action':   details.get('action',       '')                if details else '',
             })
             df_res_full.append(r)
 

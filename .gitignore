@@ -15,6 +15,8 @@ logs/*.log
 data/ledgers/*.csv
 data/portfolio/*.json
 data/db/*.db
+data/sim_cache/
+data/sim_results/
 tests/data
 tests/logs
 

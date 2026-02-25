@@ -94,3 +94,15 @@ KRW (integers, no decimals), USD (3 decimals), JPY/CNY/HKD handled via global fo
 - **EMA smoothing**: Alpha = 0.5 applied to risk components to prevent single-day whipsaws.
 - **OCI constraints**: ~1GB RAM limit — prefer generators and batch processing over loading full datasets.
 - **No linter configured**: Code style follows existing patterns in the repo.
+
+## 시스템 구조 요약
+- core/indicators.py: 지표 산출
+- core/risk_engine.py: 0.8% 손실룰, EI, 리스크 점수
+- core/entry_exit_engine.py: 진입트리거/트레일링스탑/시간청산
+- core/db_handler.py: holdings, trades, trailing_high/stop
+- performance_simulator.py: 백테스트 (개발 중)
+
+## 핵심 원칙
+- 0.8% 손실룰: entry_stop 절대 불변
+- trailing_high/stop: entry_stop과 완전 분리
+- 트레일링 스탑: ATR 기반 3단계 등급

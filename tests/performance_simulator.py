@@ -269,15 +269,17 @@ class PortfolioSimulator:
     TIME_OPP_PCT        = 5.0
 
     def __init__(self, atr_low=None, atr_mid=None, atr_high=None, entry_min=None,
-                 market_filter=None):
+                 market_filter=None, max_holdings=None, max_weight_pct=None):
         self.logger      = setup_custom_logger("PortfolioSimulator")
         self.risk_engine = RiskEngine()
 
         # 파라미터 민감도 오버라이드 지원
-        self.atr_low   = atr_low  or self.ATR_LOW
-        self.atr_mid   = atr_mid  or self.ATR_MID
-        self.atr_high  = atr_high or self.ATR_HIGH
-        self.entry_min = entry_min or self.ENTRY_MIN_OPTIONAL
+        self.atr_low        = atr_low       or self.ATR_LOW
+        self.atr_mid        = atr_mid       or self.ATR_MID
+        self.atr_high       = atr_high      or self.ATR_HIGH
+        self.entry_min      = entry_min     or self.ENTRY_MIN_OPTIONAL
+        self.max_holdings   = max_holdings  or MAX_HOLDINGS
+        self.max_weight_pct = max_weight_pct if max_weight_pct is not None else MAX_WEIGHT_PCT
 
         # ── 환율 캐시 ──────────────────────────────────────────────────────────
         self.fx_krw = self._load_fx("USDKRW=X")
@@ -442,7 +444,7 @@ class PortfolioSimulator:
 
         # ── 2. 진입 신호 체크 ─────────────────────────────────────────────────
         # 조건: 총 보유 종목 수 < MAX_HOLDINGS
-        if len(self.holdings) < MAX_HOLDINGS:
+        if len(self.holdings) < self.max_holdings:
             entry_candidates = []
             for ticker in cache_map:
                 if ticker in self.holdings:
@@ -471,7 +473,7 @@ class PortfolioSimulator:
             entry_candidates.sort(key=lambda x: x[0])
 
             for _, ticker, row, conditions in entry_candidates:
-                if len(self.holdings) >= MAX_HOLDINGS:
+                if len(self.holdings) >= self.max_holdings:
                     break
                 curr      = float(row.get('Close', 0) or 0)
                 currency  = _get_currency(ticker)
@@ -480,9 +482,9 @@ class PortfolioSimulator:
                 if avail <= 0:
                     continue
 
-                # 투입 비중: min(risk_based_weight, MAX_WEIGHT_PCT)
+                # 투입 비중: min(risk_based_weight, max_weight_pct)
                 weight_pct = self._calc_entry_weight(row)
-                invest_amt = pf_value * (min(weight_pct, MAX_WEIGHT_PCT) / 100.0)
+                invest_amt = pf_value * (min(weight_pct, self.max_weight_pct) / 100.0)
                 invest_amt = min(invest_amt, avail)
 
                 if invest_amt < curr:  # 최소 1주 매수 가능한지 확인
@@ -671,7 +673,7 @@ class PortfolioSimulator:
         risk_dist   = max(risk_dist, 0.05)   # 최소 5% 리스크 거리 보장
 
         weight_raw  = (ACCOUNT_RISK / risk_dist) * 100.0
-        return round(min(weight_raw, MAX_WEIGHT_PCT), 2)
+        return round(min(weight_raw, self.max_weight_pct), 2)
 
     def _calc_stop_loss(self, row, curr_price: float) -> float:
         """진입 시점의 손절가 계산 (disp120 기반 tech floor)"""

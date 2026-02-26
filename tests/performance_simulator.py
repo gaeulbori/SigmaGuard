@@ -49,7 +49,9 @@ SIM_END          = "2024-12-31"
 FETCH_START      = "2014-01-01"   # 5y 시그마 확보를 위한 선행 데이터
 INIT_KRW         = 40_000_000     # KRW 초기 자금
 INIT_USD         = 10_000.0       # USD 초기 자금
-MAX_HOLDINGS     = 10             # 최대 동시 보유 종목
+MAX_HOLDINGS     = 10             # 최대 동시 보유 종목 (통합 모드)
+MAX_HOLDINGS_KRW = 5              # KRW 전용 슬롯 (분리 모드)
+MAX_HOLDINGS_USD = 5              # USD 전용 슬롯 (분리 모드)
 MAX_WEIGHT_PCT   = 3.0            # 종목당 최대 비중 (%)
 ACCOUNT_RISK     = 0.008          # 단일 종목 최대 손실 허용 (0.8%)
 
@@ -269,7 +271,8 @@ class PortfolioSimulator:
     TIME_OPP_PCT        = 5.0
 
     def __init__(self, atr_low=None, atr_mid=None, atr_high=None, entry_min=None,
-                 market_filter=None, max_holdings=None, max_weight_pct=None):
+                 market_filter=None, max_holdings=None, max_weight_pct=None,
+                 max_holdings_krw=None, max_holdings_usd=None):
         self.logger      = setup_custom_logger("PortfolioSimulator")
         self.risk_engine = RiskEngine()
 
@@ -280,6 +283,9 @@ class PortfolioSimulator:
         self.entry_min      = entry_min     or self.ENTRY_MIN_OPTIONAL
         self.max_holdings   = max_holdings  or MAX_HOLDINGS
         self.max_weight_pct = max_weight_pct if max_weight_pct is not None else MAX_WEIGHT_PCT
+        # 통화 분리 슬롯 (None = 통합 모드 유지)
+        self.max_holdings_krw = max_holdings_krw  # KRW 전용 슬롯 수
+        self.max_holdings_usd = max_holdings_usd  # USD 전용 슬롯 수
 
         # ── 환율 캐시 ──────────────────────────────────────────────────────────
         self.fx_krw = self._load_fx("USDKRW=X")
@@ -352,6 +358,19 @@ class PortfolioSimulator:
             return True if pd.isna(val) else bool(val)
         except Exception:
             return True
+
+    # ── 슬롯 체크 ─────────────────────────────────────────────────────────────
+    def _slot_open(self, currency: str) -> bool:
+        """
+        해당 통화에 진입 가능한 슬롯이 있으면 True.
+        - 분리 모드 (max_holdings_krw/usd 설정): 통화별 독립 카운트
+        - 통합 모드 (미설정): 전체 보유 종목 수 vs max_holdings
+        """
+        if self.max_holdings_krw is not None and self.max_holdings_usd is not None:
+            limit = self.max_holdings_krw if currency == 'KRW' else self.max_holdings_usd
+            count = sum(1 for h in self.holdings.values() if h.get('currency') == currency)
+            return count < limit
+        return len(self.holdings) < self.max_holdings
 
     # ── 캐시 로드 ─────────────────────────────────────────────────────────────
     def _load_all_caches(self) -> dict[str, pd.DataFrame]:
@@ -443,14 +462,17 @@ class PortfolioSimulator:
             self._execute_exit(ticker, price, ratio, reason, date)
 
         # ── 2. 진입 신호 체크 ─────────────────────────────────────────────────
-        # 조건: 총 보유 종목 수 < MAX_HOLDINGS
-        if len(self.holdings) < self.max_holdings:
+        # 어느 통화든 슬롯이 남아 있을 때만 탐색
+        if self._slot_open('KRW') or self._slot_open('USD'):
             entry_candidates = []
             for ticker in cache_map:
                 if ticker in self.holdings:
                     continue
-                # 시장 필터: SPY/KS200 MA200 이하 시 신규 진입 차단
                 currency = _get_currency(ticker)
+                # 해당 통화 슬롯이 꽉 찼으면 스킵 (분리/통합 모드 자동 처리)
+                if not self._slot_open(currency):
+                    continue
+                # 시장 필터: SPY/KS200 MA200 이하 시 신규 진입 차단
                 if not self._is_market_ok(currency, date):
                     continue
                 row = self._get_row(cache_map, ticker, date)
@@ -473,10 +495,11 @@ class PortfolioSimulator:
             entry_candidates.sort(key=lambda x: x[0])
 
             for _, ticker, row, conditions in entry_candidates:
-                if len(self.holdings) >= self.max_holdings:
-                    break
+                currency = _get_currency(ticker)
+                # 실행 시점에 슬롯 재확인 (이전 진입으로 슬롯이 찰 수 있음)
+                if not self._slot_open(currency):
+                    continue
                 curr      = float(row.get('Close', 0) or 0)
-                currency  = _get_currency(ticker)
                 pf_value  = self._portfolio_value(currency, cache_map, date)
                 avail     = self.cash_krw if currency == "KRW" else self.cash_usd
                 if avail <= 0:

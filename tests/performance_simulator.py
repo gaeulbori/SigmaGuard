@@ -831,9 +831,16 @@ class PortfolioSimulator:
             for t, h in self.holdings.items():
                 if (h.get('currency') == 'KRW') != (currency_filter == 'KRW'):
                     continue
-                row = self._get_row(cache_map, t, date)
-                if row is not None:
-                    total += float(row.get('Close', 0) or 0) * h['qty']
+                df = cache_map.get(t)
+                if df is None:
+                    continue
+                # 해당 날짜 데이터 없으면 직전 영업일 종가 사용 (공휴일 대응)
+                if date in df.index:
+                    close = float(df.loc[date].get('Close', 0) or 0)
+                else:
+                    asof_idx = df.index.asof(date)
+                    close = float(df.loc[asof_idx].get('Close', 0) or 0) if not pd.isna(asof_idx) else 0.0
+                total += close * h['qty']
             return total
 
         krw_stock = _stock_val('KRW')

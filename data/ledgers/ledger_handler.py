@@ -196,7 +196,7 @@ class LedgerHandler:
         df = pd.read_csv(file_path)
         df['Audit_Date'] = pd.to_datetime(df['Audit_Date'])
         mask = df['Ret_20d'].isna() & (df['Audit_Date'] <= datetime.now() - timedelta(days=20))
-        target_rows = df[mask]
+        target_rows = df[mask].head(2)  # 1회 실행당 최대 2행 처리 (OCI 리소스 보호)
         if target_rows.empty: return
         for idx, row in target_rows.iterrows():
             try:

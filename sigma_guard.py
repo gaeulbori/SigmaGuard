@@ -426,11 +426,14 @@ class SigmaGuard:
 
         # 2.5 사후 결산(update_forward_returns) — 감사 루프 완료 후 일괄 처리
         # run_audit() 내부에서 호출하면 yfinance hang 시 전체 루프가 중단되므로 분리
+        # time.sleep(1): 티커 간 간격으로 yfinance rate limit 회피 및 OCI 부하 분산
+        import time
         for ticker in list(audit_results_summary.keys()):
             try:
                 self.ledger.update_forward_returns(ticker)
             except Exception as e:
                 logger.warning(f"⚠️ [{ticker}] 사후 결산 실패 (스킵): {e}")
+            time.sleep(1)
 
         # 3. 리포트 출력 및 발송
         # (1) 터미널: 감시 종목 요약표

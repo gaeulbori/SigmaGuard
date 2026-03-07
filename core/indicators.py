@@ -13,10 +13,33 @@
 - Vectorized Math: Pandas/NumPy 기반 연산으로 시계열 데이터 전 구간의 지표를 고속 산출.
 """
 
+import threading
 import pandas as pd
 import numpy as np
 import yfinance as yf
 from utils.logger import setup_custom_logger
+
+
+def _yf_download_safe(ticker, timeout=20, **kwargs):
+    """yf.download()를 daemon 스레드로 실행하여 timeout(초) 초과 시 TimeoutError 발생."""
+    result = [None]
+    exc = [None]
+
+    def _worker():
+        try:
+            result[0] = yf.download(ticker, **kwargs)
+        except Exception as e:
+            exc[0] = e
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+
+    if t.is_alive():
+        raise TimeoutError(f"yf.download({ticker}) timed out after {timeout}s")
+    if exc[0]:
+        raise exc[0]
+    return result[0]
 
 logger = setup_custom_logger("Indicators")
 
@@ -36,7 +59,7 @@ class Indicators:
         try:
             #logger.info(f"📥 [{ticker}] 시세 데이터 로드 중... (기간: {period})")
             # auto_adjust=True로 수정하여 yfinance 경고 방지 및 실질 가격 반영
-            df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
+            df = _yf_download_safe(ticker, timeout=30, period=period, interval="1d", progress=False, auto_adjust=True)
             
             if df.empty:
                 logger.error(f"❌ [{ticker}] 데이터를 찾을 수 없습니다.")
@@ -273,7 +296,7 @@ class Indicators:
         
         try:
             # 한 번의 호출로 모든 환율 데이터 수집
-            data = yf.download(list(tickers.values()), period="5d", interval="1d", progress=False, auto_adjust=True)            
+            data = _yf_download_safe(list(tickers.values()), timeout=20, period="5d", interval="1d", progress=False, auto_adjust=True)
             
             if not data.empty:
                 for label, ticker in tickers.items():

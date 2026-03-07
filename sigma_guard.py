@@ -110,7 +110,6 @@ class SigmaGuard:
                 bench_latest=bench_latest, # <- [중요] 여기서 다시 bench_df.iloc[-1]을 호출하지 않습니다.
                 bench_ticker=bench_ticker
             )
-            self.ledger.update_forward_returns(ticker)
 
             # 6. 리포트 및 결과 반환
             self.reporter.print_audit_report(
@@ -424,6 +423,14 @@ class SigmaGuard:
                     if prev is None: new_stocks.append(msg)
                     elif audit_data['score'] > prev: risk_up.append(msg)
                     else: risk_down.append(msg)
+
+        # 2.5 사후 결산(update_forward_returns) — 감사 루프 완료 후 일괄 처리
+        # run_audit() 내부에서 호출하면 yfinance hang 시 전체 루프가 중단되므로 분리
+        for ticker in list(audit_results_summary.keys()):
+            try:
+                self.ledger.update_forward_returns(ticker)
+            except Exception as e:
+                logger.warning(f"⚠️ [{ticker}] 사후 결산 실패 (스킵): {e}")
 
         # 3. 리포트 출력 및 발송
         # (1) 터미널: 감시 종목 요약표

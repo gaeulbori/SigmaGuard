@@ -15,15 +15,18 @@
 import unittest
 import sys
 import os
+import time
+import threading
 import pandas as pd
 import tempfile
 import shutil
 from pathlib import Path
 from datetime import datetime, timedelta
+from unittest.mock import patch, MagicMock
 
 # [Path Fix] 프로젝트 루트(SG)를 검색 경로에 추가
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data.ledgers.ledger_handler import LedgerHandler
+from data.ledgers.ledger_handler import LedgerHandler, _yf_download_safe
 
 class TestLedgerAudit(unittest.TestCase):
     def setUp(self):
@@ -141,6 +144,113 @@ class TestLedgerAudit(unittest.TestCase):
         
         self.assertEqual(target_count, 1, f"❌ 결산 대상 선정 오류: 1건이어야 하나 {target_count}건 감지됨")
         print(f"✅ 사후 결산 대상 필터링 확인 (대상: {date_target})")
+
+class TestYfDownloadSafe(unittest.TestCase):
+    """_yf_download_safe() — timeout 동작 및 정상 반환 검증"""
+
+    def test_08_returns_result_on_success(self):
+        print("\n🔍 [검증 8] _yf_download_safe 정상 반환 테스트...")
+        mock_df = MagicMock()
+        with patch("data.ledgers.ledger_handler.yf.download", return_value=mock_df):
+            result = _yf_download_safe("AAPL", timeout=5, period="1d", progress=False)
+        self.assertIs(result, mock_df)
+        print("✅ 정상 반환 확인")
+
+    def test_09_raises_timeout_error_on_hang(self):
+        print("\n🔍 [검증 9] _yf_download_safe 타임아웃 검증 (1초 제한)...")
+
+        def _slow_download(*args, **kwargs):
+            time.sleep(5)  # 5초 블로킹 — timeout보다 훨씬 긺
+            return MagicMock()
+
+        with patch("data.ledgers.ledger_handler.yf.download", side_effect=_slow_download):
+            with self.assertRaises(TimeoutError):
+                _yf_download_safe("AAPL", timeout=1, period="1d", progress=False)
+        print("✅ TimeoutError 정상 발생 확인")
+
+    def test_10_propagates_yf_exception(self):
+        print("\n🔍 [검증 10] _yf_download_safe yfinance 내부 예외 전파 테스트...")
+        with patch("data.ledgers.ledger_handler.yf.download", side_effect=ValueError("yf error")):
+            with self.assertRaises(ValueError):
+                _yf_download_safe("AAPL", timeout=5, period="1d", progress=False)
+        print("✅ yfinance 예외 전파 확인")
+
+
+class TestUpdateForwardReturnsWithTimeout(unittest.TestCase):
+    """update_forward_returns() — timeout 시 행 스킵, 정상 데이터 정상 기입 검증"""
+
+    def setUp(self):
+        self.test_dir = Path(tempfile.mkdtemp())
+        self.handler = LedgerHandler()
+        self.handler.data_dir = self.test_dir / "ledgers"
+        self.handler.data_dir.mkdir(parents=True)
+        self.ticker = "AAPL"
+
+        self.latest = {
+            'Close': 150.0, 'RSI': 55.0, 'MFI': 60.0, 'bbw': 0.1, 'bbw_thr': 0.3,
+            'disp120': 100.0, 'disp120_limit': 115.0, 'R2': 0.9, 'ADX': 25.0,
+            'avg_sigma': 1.5, 'sig_1y': 1.0, 'sig_2y': 1.0, 'sig_3y': 1.0,
+            'sig_4y': 1.0, 'sig_5y': 1.0
+        }
+        self.alloc = {'stop_loss': 140.0, 'risk_pct': 2.5, 'ei': 100, 'weight': 10.0}
+        self.details = {'base_raw': 70, 'multiplier': 1.0, 'scenario': 'Bull', 'p1': 20, 'p2': 30, 'p4': 20}
+        self.bt_res = {'avg_mdd': -5.0}
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir)
+
+    def test_11_update_forward_returns_skips_row_on_timeout(self):
+        print("\n🔍 [검증 11] update_forward_returns — timeout 시 해당 행 스킵, Ret_20d NaN 유지...")
+        # 25일 전 데이터 생성 (결산 대상)
+        date_target = (datetime.now() - timedelta(days=25)).strftime("%Y-%m-%d")
+        self.handler.save_entry(self.ticker, "Apple", date_target, self.latest, 50.0,
+                                self.details, self.alloc, self.bt_res, {})
+
+        def _slow_download(*args, **kwargs):
+            time.sleep(5)
+
+        with patch("data.ledgers.ledger_handler.yf.download", side_effect=_slow_download):
+            # timeout=1로 강제 짧게 설정 → TimeoutError → except 블록에서 continue
+            import data.ledgers.ledger_handler as lh_mod
+            orig = lh_mod._yf_download_safe
+            def _patched_safe(ticker, timeout=20, **kwargs):
+                return orig(ticker, timeout=1, **kwargs)  # 강제 1초 제한
+            with patch.object(lh_mod, "_yf_download_safe", side_effect=_patched_safe):
+                self.handler.update_forward_returns(self.ticker)
+
+        file_path = self.handler._get_file_path(self.ticker)
+        df = pd.read_csv(file_path)
+        # Ret_20d는 여전히 NaN (timeout으로 skip)
+        self.assertTrue(pd.isna(df.iloc[0]['Ret_20d']),
+                        "timeout 발생 시 Ret_20d는 NaN으로 유지되어야 함")
+        print("✅ timeout 시 Ret_20d NaN 유지 확인")
+
+    def test_12_update_forward_returns_fills_ret_on_success(self):
+        print("\n🔍 [검증 12] update_forward_returns — 정상 데이터 수신 시 Ret_20d 기입...")
+        date_target = (datetime.now() - timedelta(days=25)).strftime("%Y-%m-%d")
+        self.handler.save_entry(self.ticker, "Apple", date_target, self.latest, 50.0,
+                                self.details, self.alloc, self.bt_res, {})
+
+        # 20일치 가짜 hist DataFrame 구성
+        import numpy as np
+        idx = pd.date_range(start=date_target, periods=20, freq='B')
+        mock_hist = pd.DataFrame({
+            'Open':   [150.0] * 20,
+            'High':   [165.0] * 20,
+            'Low':    [140.0] * 20,
+            'Close':  [160.0] * 20,
+            'Volume': [1000000] * 20,
+        }, index=idx)
+
+        with patch("data.ledgers.ledger_handler._yf_download_safe", return_value=mock_hist):
+            self.handler.update_forward_returns(self.ticker)
+
+        file_path = self.handler._get_file_path(self.ticker)
+        df = pd.read_csv(file_path)
+        # Ret_20d = (160 - 150) / 150 * 100 = 6.67
+        self.assertAlmostEqual(df.iloc[0]['Ret_20d'], 6.67, places=1)
+        print(f"✅ Ret_20d 기입 확인: {df.iloc[0]['Ret_20d']:.2f}%")
+
 
 if __name__ == '__main__':
     unittest.main()

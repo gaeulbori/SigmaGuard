@@ -16,6 +16,7 @@
 """
 
 import os
+import threading
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -23,6 +24,29 @@ from datetime import datetime, timedelta
 from config.settings import settings
 from utils.logger import setup_custom_logger
 from core.risk_engine import RiskEngine
+
+
+def _yf_download_safe(ticker, timeout=20, **kwargs):
+    """yf.download()를 daemon 스레드로 실행하여 timeout(초) 초과 시 TimeoutError 발생.
+    yfinance는 자체 timeout 파라미터를 지원하지 않으므로 threading으로 강제 적용."""
+    result = [None]
+    exc = [None]
+
+    def _worker():
+        try:
+            result[0] = yf.download(ticker, **kwargs)
+        except Exception as e:
+            exc[0] = e
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+
+    if t.is_alive():
+        raise TimeoutError(f"yf.download({ticker}) timed out after {timeout}s")
+    if exc[0]:
+        raise exc[0]
+    return result[0]
 
 logger = setup_custom_logger("LedgerHandler")
 
@@ -52,7 +76,7 @@ class LedgerHandler:
         macro_tickers = {"^VIX": "VIX_T", "^TNX": "US10Y_T", "DX-Y.NYB": "DXY_T"}
         results = {"VIX_T": 0.0, "US10Y_T": 0.0, "DXY_T": 0.0}
         try:
-            data = yf.download(list(macro_tickers.keys()), period="5d", progress=False, auto_adjust=True)            
+            data = _yf_download_safe(list(macro_tickers.keys()), timeout=20, period="5d", progress=False, auto_adjust=True)
             if not data.empty:
                 for ticker, field in macro_tickers.items():
                     valid_series = data['Close'][ticker].dropna()
@@ -177,7 +201,7 @@ class LedgerHandler:
         for idx, row in target_rows.iterrows():
             try:
                 audit_date = row['Audit_Date']
-                hist = yf.download(ticker, start=audit_date, end=audit_date + timedelta(days=30), progress=False, auto_adjust=True)
+                hist = _yf_download_safe(ticker, timeout=20, start=audit_date, end=audit_date + timedelta(days=30), progress=False, auto_adjust=True)
                 if not hist.empty:
                     period_data = hist.iloc[:20]
                     p0 = float(row['Price_T'])

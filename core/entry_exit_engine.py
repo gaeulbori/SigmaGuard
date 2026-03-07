@@ -1,12 +1,16 @@
 """
 [File Purpose]
-- 진입 트리거, 트레일링 스탑, 시간 기반 청산 신호를 감지하는 엔진.
+- 진입 트리거, 트레일링 스탑, 시간 기반 청산, entry_stop 손절, 리스크레벨 청산 신호를 감지하는 엔진.
 - SigmaGuard의 감사 루프(execute_all) 완료 후 실전 매매 의사결정을 보조하는 신호 생성.
+- 시뮬레이션(performance_simulator.py) 로직과 동기화됨.
 
 [Signal Types]
-- Entry Trigger  : 저위험 구간(레벨 1~3)에서 복수 조건 충족 시 진입 검토 신호
-- Trailing Stop  : 수익 구간(+5% 이상)에서 고점 대비 낙폭 -3% 초과 시 청산 신호
-- Time-based Exit: T+60일 손실 지속 또는 T+90일 수익 +5% 미만 시 청산 검토 신호
+- Entry Trigger    : 저위험 구간(레벨 1~3)에서 복수 조건 충족 시 진입 검토 신호
+- Entry Stop       : 진입 시 설정한 손절가 이탈 시 즉시 전량 청산
+- Trailing Stop    : 수익 구간(+5% 이상)에서 trail_stop(고점-ATR×배수) 이탈 시 전량 청산
+                     USD: ATR×3/4/5, KRW: ATR×6/8/10 (수익 구간별)
+- Risk Level Exit  : 리스크 레벨 9→전량, 레벨 8→70% 청산
+- Time-based Exit  : T+60일 손실 지속 또는 T+90일 수익 +5% 미만 시 청산 검토 신호
 """
 
 from datetime import datetime
@@ -27,13 +31,15 @@ class EntryExitEngine:
         # --- 트레일링 스탑 임계치 ---
         self.TRAIL_PROFIT_FLOOR = 5.0    # 활성화 최소 수익률 (%)
 
-        # 수익률 구간별 ATR 배수 (보호 강도 차등)
-        self.TRAIL_ATR_LOW  = 2.0        # 수익 +5~20% 구간
-        self.TRAIL_ATR_MID  = 2.5        # 수익 +20~50% 구간
-        self.TRAIL_ATR_HIGH = 3.0        # 수익 +50% 이상 구간
+        # 수익률 구간별 ATR 배수 — USD 기준 (시뮬 동기화)
+        self.TRAIL_ATR_LOW  = 3.0        # USD +5~20% 구간
+        self.TRAIL_ATR_MID  = 4.0        # USD +20~50% 구간
+        self.TRAIL_ATR_HIGH = 5.0        # USD +50%+ 구간
 
-        # 축2 기준: 레벨 6 이상 (score >= 61)
-        self.TRAIL_SCORE_THR = 61.0
+        # KRW 전용 ATR 배수 (추세 지속형, USD 대비 느슨하게)
+        self.TRAIL_ATR_LOW_KRW  = 6.0   # KRW +5~20% 구간
+        self.TRAIL_ATR_MID_KRW  = 8.0   # KRW +20~50% 구간
+        self.TRAIL_ATR_HIGH_KRW = 10.0  # KRW +50%+ 구간
 
         # --- 시간 기반 청산 임계치 ---
         self.TIME_LOSS_DAYS = 60          # 손실 장기화 판단 기준 경과일
@@ -116,23 +122,16 @@ class EntryExitEngine:
     def check_trailing_stop(self, holding, current_price, ind_df=None,
                              score=None, score_history=None):
         """
-        [트레일링 스탑 감지 — ATR 다축 등급 버전]
+        [트레일링 스탑 감지 — 단순 trail_stop 이탈 방식 (시뮬 동기화)]
 
-        수익률 구간별 ATR 배수:
-          +5~20%  → ATR * 2.0
-          +20~50% → ATR * 2.5
-          +50%+   → ATR * 3.0
+        수익률 구간별 ATR 배수 (통화별):
+          USD: +5~20% → ×3.0 / +20~50% → ×4.0 / +50%+ → ×5.0
+          KRW: +5~20% → ×6.0 / +20~50% → ×8.0 / +50%+ → ×10.0
 
-        3개 축 동시 판정:
-          축1(가격): 현재가 < trailing_high - ATR*배수
-          축2(점수): 레벨 6+(score≥61) AND 최근 3일 점수 연속 상승
-          축3(수급): [MFI<RSI] · [MACD 3일 연속 감소] · [ADX 약화] 중 2개 이상
-
-        등급:
-          3단계 🔴 (축1+2+3): 전량 청산
-          2단계 🟠 (축1+2)  : 분할 청산 (수익 50%+ → 30%, 미만 → 50%)
-          1단계 🟡 (축1|2)  : 관찰만
-          0      (나머지)  : 미발동
+        판정:
+          trail_stop = trailing_high - ATR × 배수
+          현재가 < trail_stop → grade=3 (전량 청산)
+          그 외              → grade=0 (미발동)
 
         반환: (grade: int, profit_pct: float, details: dict)
         """
@@ -165,112 +164,56 @@ class EntryExitEngine:
                 logger.warning(f"⚠️ [{ticker}] ATR 값 미확보 — 트레일링 스탑 비활성")
                 return 0, profit_pct, {}
 
-            # ── 수익률 구간별 ATR 배수 결정 ────────────────────────────
-            if profit_pct >= 50.0:
-                atr_mult = self.TRAIL_ATR_HIGH
-            elif profit_pct >= 20.0:
-                atr_mult = self.TRAIL_ATR_MID
+            # ── 통화별 ATR 배수 결정 ────────────────────────────────
+            currency = holding.get('currency', 'USD')
+            if currency == 'KRW':
+                if profit_pct >= 50.0:
+                    atr_mult = self.TRAIL_ATR_HIGH_KRW
+                elif profit_pct >= 20.0:
+                    atr_mult = self.TRAIL_ATR_MID_KRW
+                else:
+                    atr_mult = self.TRAIL_ATR_LOW_KRW
             else:
-                atr_mult = self.TRAIL_ATR_LOW
+                if profit_pct >= 50.0:
+                    atr_mult = self.TRAIL_ATR_HIGH
+                elif profit_pct >= 20.0:
+                    atr_mult = self.TRAIL_ATR_MID
+                else:
+                    atr_mult = self.TRAIL_ATR_LOW
 
             # ── trailing_high 단방향 갱신 (DB 저장값 기준) ────────────
             existing_trail_high = holding.get('trailing_high', 0.0) or 0.0
             new_trail_high      = max(current_price, existing_trail_high)
 
-            # 동적 스탑가: trailing_high - ATR * 배수
+            # 동적 스탑가: trailing_high - ATR × 배수
             trail_stop_price = new_trail_high - (atr * atr_mult)
 
             # 고점 대비 현재가 낙폭
             drawdown_pct = ((current_price - new_trail_high)
                             / (new_trail_high + 1e-10)) * 100
 
-            # ── 축1: 가격 이탈 ────────────────────────────────────────
-            axis1 = bool(current_price < trail_stop_price)
-
-            # ── 축2: 리스크 점수 레벨 + 연속 상승 추세 ───────────────────
-            # 레벨 6+(score≥61) AND score_history에서 현재까지 단조 증가 확인
-            axis2 = False
-            if score is not None and score >= self.TRAIL_SCORE_THR:
-                if score_history and len(score_history) >= 2:
-                    # score_history = [oldest, ..., newest] (현재값 제외)
-                    rising_hist = all(
-                        score_history[i] < score_history[i + 1]
-                        for i in range(len(score_history) - 1)
-                    )
-                    axis2 = rising_hist and (score_history[-1] < score)
-                # 이력 부족(< 2건) 시 연속 상승 미확인 → axis2=False 유지
-
-            # ── 축3: 수급 약화 2/3 이상 ──────────────────────────────
-            axis3_flags = {'mfi_rsi': False, 'macd': False, 'adx': False}
-            if ind_df is not None and len(ind_df) >= 3:
-                latest = ind_df.iloc[-1]
-                prev   = ind_df.iloc[-2]
-                prev2  = ind_df.iloc[-3]
-
-                # 수급1: MFI < RSI (머니플로우 약화)
-                axis3_flags['mfi_rsi'] = bool(
-                    latest.get('MFI', 50.0) < latest.get('RSI', 50.0)
-                )
-
-                # 수급2: MACD 히스토그램 3일 연속 감소
-                m0 = latest.get('macd_h', 0.0)
-                m1 = prev.get('macd_h', 0.0)
-                m2 = prev2.get('macd_h', 0.0)
-                axis3_flags['macd'] = bool(m2 > m1 > m0)
-
-                # 수급3: ADX 약화 (전일 대비 감소)
-                axis3_flags['adx'] = bool(
-                    latest.get('ADX', 0.0) < prev.get('ADX', 0.0)
-                )
-
-            axis3_count = sum(axis3_flags.values())
-            axis3       = (axis3_count >= 2)
-
-            # ── 등급 판정 ─────────────────────────────────────────────
-            if   axis1 and axis2 and axis3: grade = 3  # 🔴 전량 청산
-            elif axis1 and axis2:           grade = 2  # 🟠 분할 청산
-            elif axis1 or  axis2:           grade = 1  # 🟡 관찰
-            else:                           grade = 0  # 미발동
-
-            # 분할 비율 (2단계 한정)
-            sell_ratio = 0.0
-            if grade == 3:
-                sell_ratio = 1.0
-            elif grade == 2:
-                sell_ratio = 0.30 if profit_pct >= 50.0 else 0.50
-
             # ── DB 갱신 (수익 +5% 이상이면 trailing_high 항상 추적) ───
             if self.db:
                 self.db.update_trailing_high(ticker, new_trail_high, trail_stop_price)
 
+            # ── 이탈 판정 (단순 전량 청산) ────────────────────────────
+            grade = 3 if current_price < trail_stop_price else 0
+
             details = {
-                'axis1':            axis1,
-                'axis2':            axis2,
-                'axis3':            axis3,
-                'axis3_flags':      axis3_flags,
                 'atr':              atr,
                 'atr_mult':         atr_mult,
+                'currency':         currency,
                 'trailing_high':    new_trail_high,
                 'trail_stop_price': trail_stop_price,
                 'drawdown_pct':     drawdown_pct,
-                'sell_ratio':       sell_ratio,
+                'sell_ratio':       1.0 if grade == 3 else 0.0,
             }
 
             if grade == 3:
                 logger.info(
-                    f"🔴 [{ticker}] 트레일링 스탑 3단계 (전량청산) "
-                    f"수익: {profit_pct:+.1f}%, ATR: {atr:.2f}×{atr_mult}, "
-                    f"스탑: ${trail_stop_price:.2f}, 낙폭: {drawdown_pct:+.1f}%"
-                )
-            elif grade == 2:
-                logger.info(
-                    f"🟠 [{ticker}] 트레일링 스탑 2단계 (분할청산 {sell_ratio*100:.0f}%) "
-                    f"수익: {profit_pct:+.1f}%, ATR: {atr:.2f}×{atr_mult}"
-                )
-            elif grade == 1:
-                logger.info(
-                    f"🟡 [{ticker}] 트레일링 스탑 1단계 (관찰) "
-                    f"수익: {profit_pct:+.1f}%, 축1={axis1}, 축2={axis2}"
+                    f"🔴 [{ticker}] 트레일링 스탑 발동 (전량청산) "
+                    f"수익: {profit_pct:+.1f}%, {currency} ATR: {atr:.2f}×{atr_mult}, "
+                    f"스탑: {trail_stop_price:.2f}, 낙폭: {drawdown_pct:+.1f}%"
                 )
 
             return grade, profit_pct, details
@@ -278,6 +221,37 @@ class EntryExitEngine:
         except Exception as e:
             logger.error(f"❌ [{ticker}] 트레일링 스탑 계산 오류: {e}")
             return 0, profit_pct, {}
+
+    def check_entry_stop(self, holding, current_price):
+        """
+        [Entry Stop 손절 감지]
+        - 진입 시 설정한 손절가(entry_stop) 이탈 시 즉시 전량 청산 신호
+        - 반환: bool (True = 손절 발동)
+        """
+        entry_stop = holding.get('entry_stop', 0.0) or 0.0
+        if entry_stop > 0 and current_price < entry_stop:
+            ticker = holding.get('ticker', '?')
+            logger.info(
+                f"🛑 [{ticker}] Entry Stop 손절 발동 "
+                f"(현재가: {current_price:.2f} < 손절가: {entry_stop:.2f})"
+            )
+            return True
+        return False
+
+    def check_risk_level_exit(self, risk_level):
+        """
+        [리스크 레벨 기반 청산 감지]
+        - 레벨 9 (score ≥ 91): 전량 청산 (100%)
+        - 레벨 8 (score ≥ 81): 70% 청산
+        - 그 외: 미발동
+        - 반환: (triggered: bool, ratio: float, reason: str)
+        """
+        level = int(risk_level or 0)
+        if level >= 9:
+            return True, 1.0, "risk_lv9"
+        if level >= 8:
+            return True, 0.70, "risk_lv8"
+        return False, 0.0, ""
 
     def check_time_based_exit(self, holding, current_price):
         """

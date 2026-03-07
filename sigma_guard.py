@@ -296,18 +296,15 @@ class SigmaGuard:
             self.logger.warning("     ⚠️ 진입 트리거 미발동 — Mock 데이터 점검 필요")
 
         # ─────────────────────────────────────────────────────────────
-        # 케이스 2: B (Barrick) — 트레일링 스탑 2단계 🟠 발동 Mock
-        # avg=28.5, current=37.05(+30%), trailing_high=42.0
-        # ATR=1.5, mult=2.5(20~50%) → stop=42.0-3.75=38.25 → current(37.05)<38.25 → 축1 True
-        # score=68(≥61), score_history=[55,62] → 55<62<68 → 축2 True
-        # axis3: MFI(42)<RSI(58) ✅ / MACD 연속감소 ✅ / ADX 유지 ⛔ → 2/3 → 축3 True → grade=3
+        # 케이스 2: B (Barrick) — 트레일링 스탑 발동 Mock
+        # avg=28.5, current=37.05(+30%), trailing_high=44.0
+        # ATR=1.5, USD mult=4.0(+20~50%) → stop=44.0-6.0=38.0 → current(37.05)<38.0 → 발동
         # ─────────────────────────────────────────────────────────────
         self.logger.info("  [2/3] B(Barrick) 트레일링 스탑 Mock 생성 중...")
 
         b_avg_price     = 28.5
         b_current_price = round(b_avg_price * 1.30, 2)   # +30.0% → $37.05
 
-        # ind_df: ATR=1.5, 축3 수급 약화 조건 충족 (3행 필요)
         b_ind_df = pd.DataFrame([
             {'atr': 1.5, 'MFI': 45.0, 'RSI': 56.0, 'macd_h': 0.30, 'ADX': 22.0},  # T-2
             {'atr': 1.5, 'MFI': 43.0, 'RSI': 57.0, 'macd_h': 0.15, 'ADX': 21.0},  # T-1
@@ -320,32 +317,22 @@ class SigmaGuard:
             'avg_price':     b_avg_price,
             'entry_stop':    round(b_avg_price * 0.90, 2),
             'last_updated':  '2025-08-01',
-            'trailing_high': 42.0,   # 이전 고점 (DB 저장값 시뮬레이션)
+            'trailing_high': 44.0,   # trail_stop = 44.0 - 1.5×4.0 = 38.0 > current(37.05)
+            'currency':      'USD',
         }
 
-        b_score         = 68.0          # 레벨 7 (≥ 61 → 축2 조건 충족)
-        b_score_history = [55.0, 62.0]  # 55 < 62 < 68 → 3일 연속 상승 → 축2 True
-
         grade, profit_pct, details = self.ee_engine.check_trailing_stop(
-            holding=b_holding, current_price=b_current_price, ind_df=b_ind_df,
-            score=b_score, score_history=b_score_history
+            holding=b_holding, current_price=b_current_price, ind_df=b_ind_df
         )
-        if grade >= 2:
-            ax1 = '✅' if details.get('axis1') else '⛔'
-            ax2 = '✅' if details.get('axis2') else '⛔'
-            ax3 = '✅' if details.get('axis3') else '⛔'
-            grade_emoji = {2: '🟠', 3: '🔴'}.get(grade, '🟠')
+        if grade == 3:
             signal_msgs.append(
-                f"{grade_emoji} <b>[B] 트레일링 스탑 {grade}단계</b>\n"
+                f"🔴 <b>[B] 트레일링 스탑 전량청산</b>\n"
                 f"수익률: {profit_pct:+.1f}%  |  ATR배수: {details.get('atr_mult')}x\n"
                 f"고점: ${details.get('trailing_high', 0):.2f}  |  "
                 f"스탑가: ${details.get('trail_stop_price', 0):.2f}\n"
-                f"축1(가격): {ax1}  축2(점수): {ax2}  축3(수급): {ax3}\n"
                 f"⚡ 권고 매도비율: {details.get('sell_ratio', 0)*100:.0f}%"
             )
-            self.logger.info(f"     ✅ 트레일링 스탑 {grade}단계 발동 (수익 {profit_pct:+.1f}%)")
-        elif grade == 1:
-            self.logger.info(f"     🟡 트레일링 스탑 1단계 관찰 (수익 {profit_pct:+.1f}%)")
+            self.logger.info(f"     ✅ 트레일링 스탑 발동 (수익 {profit_pct:+.1f}%)")
         else:
             self.logger.warning("     ⚠️ 트레일링 스탑 미발동 — Mock 데이터 점검 필요")
 
@@ -481,8 +468,7 @@ class SigmaGuard:
                     f"권고 비중: {audit_data.get('weight', 0.0):.1f}%"
                 )
 
-        # 4-2. 트레일링 스탑 & 시간 청산: 보유 종목 대상
-        # check_trailing_stop() 내부에서 수익 +5% 이상 종목의 trailing_high 자동 갱신
+        # 4-2. 청산 신호 감지: 보유 종목 대상 (entry_stop → 트레일링 → 리스크레벨 → 시간 순)
         for holding in holdings:
             ticker = holding['ticker']
             if ticker not in audit_results_summary:
@@ -490,42 +476,45 @@ class SigmaGuard:
             audit_data    = audit_results_summary[ticker]
             current_price = audit_data.get('price', 0.0)
             ind_df        = ind_cache.get(ticker)
-            score         = audit_data.get('score')
-            market_date   = audit_data.get('market_date', datetime.now().strftime('%Y-%m-%d'))
+            score         = audit_data.get('score', 0.0)
 
-            # 최근 2일 점수 이력 (oldest→newest) + 현재 score = 3일치 연속 상승 판정용
-            score_history = self.ledger.get_recent_scores(ticker, market_date, n=2)
+            # ── 신호 1: Entry Stop 손절 (최우선) ──────────────────────
+            if self.ee_engine.check_entry_stop(holding, current_price):
+                entry_stop = holding.get('entry_stop', 0.0)
+                trail_action.append(
+                    f"🛑 <b>[{ticker}] Entry Stop 손절</b>\n"
+                    f"  현재가: {current_price:.2f}  |  손절가: {entry_stop:.2f}\n"
+                    f"  ⚡ 권고 매도비율: 100%"
+                )
+                continue  # entry_stop 발동 시 다른 청산 신호 불필요
 
-            # 트레일링 스탑 검사 (ATR 다축 등급)
+            # ── 신호 2: 트레일링 스탑 ─────────────────────────────────
             grade, profit_pct, details = self.ee_engine.check_trailing_stop(
-                holding, current_price, ind_df,
-                score=score, score_history=score_history
+                holding, current_price, ind_df
             )
-
-            if grade >= 1:
-                ax1 = '✅' if details.get('axis1') else '⛔'
-                ax2 = '✅' if details.get('axis2') else '⛔'
-                ax3 = '✅' if details.get('axis3') else '⛔'
+            if grade == 3:
                 atr_mult   = details.get('atr_mult', 0)
                 trail_hi   = details.get('trailing_high', 0)
                 stop_price = details.get('trail_stop_price', 0)
-                grade_emoji = {1: '🟡', 2: '🟠', 3: '🔴'}[grade]
-                grade_text  = {1: '1단계 관찰', 2: '2단계 분할청산', 3: '3단계 전량청산'}[grade]
-
-                msg = (
-                    f"{grade_emoji} <b>[{ticker}] 트레일링 스탑 {grade_text}</b>\n"
-                    f"  수익률: {profit_pct:+.1f}%  |  ATR배수: {atr_mult}x\n"
-                    f"  고점: ${trail_hi:.2f}  |  스탑가: ${stop_price:.2f}\n"
-                    f"  축1(가격): {ax1}  축2(점수): {ax2}  축3(수급): {ax3}"
+                currency   = details.get('currency', 'USD')
+                trail_action.append(
+                    f"🔴 <b>[{ticker}] 트레일링 스탑 전량청산</b>\n"
+                    f"  수익률: {profit_pct:+.1f}%  |  {currency} ATR배수: {atr_mult}x\n"
+                    f"  고점: {trail_hi:.2f}  |  스탑가: {stop_price:.2f}\n"
+                    f"  ⚡ 권고 매도비율: 100%"
                 )
-                if grade >= 2:
-                    sell_pct = details.get('sell_ratio', 0) * 100
-                    msg += f"\n  ⚡ 권고 매도비율: {sell_pct:.0f}%"
-                    trail_action.append(msg)
-                else:
-                    signal_msgs.append(msg)
 
-            # 시간 기반 청산 검사
+            # ── 신호 3: 리스크 레벨 기반 청산 ────────────────────────
+            risk_level = self.risk_engine.get_level(score)
+            triggered, ratio, reason = self.ee_engine.check_risk_level_exit(risk_level)
+            if triggered:
+                trail_action.append(
+                    f"⚠️ <b>[{ticker}] 리스크 레벨 청산 ({reason})</b>\n"
+                    f"  현재 점수: {score:.1f}  |  레벨: {risk_level}\n"
+                    f"  ⚡ 권고 매도비율: {ratio*100:.0f}%"
+                )
+
+            # ── 신호 4: 시간 기반 청산 ────────────────────────────────
             exit_signal = self.ee_engine.check_time_based_exit(holding, current_price)
             if exit_signal:
                 signal_msgs.append(

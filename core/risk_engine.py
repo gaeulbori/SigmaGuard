@@ -157,26 +157,31 @@ class RiskEngine:
         return f"{status} (✅추세확증 할인적용)", base_discount
 
 
-    def apply_risk_management(self, latest, df_t):
-        """[핵심] David's SOP 기반 정밀 자본 할당 (손절가/비중/EI)"""
-        last_year = df_t['Close'].iloc[-252:]
-        p_stat_floor = last_year.mean() - (2.0 * last_year.std())
-        p_tech_floor = (latest.get('Close') / (latest.get('disp120', 100)/100)) * 0.92
-        
-        final_stop = max(p_stat_floor, p_tech_floor)
-        curr_p = latest.get('Close') or 0.0
-        
-        risk_dist = (curr_p - final_stop) / (curr_p + 1e-10) if curr_p > final_stop else 0.10
-        if curr_p <= final_stop: final_stop = curr_p * 0.90
-            
-        ei = round(self.EI_BENCHMARK / (risk_dist + 1e-10), 2)
+    def apply_risk_management(self, latest, df_t=None):
+        """[핵심] SOP 기반 자본 할당 (손절가/비중/EI) — 시뮬 동기화
+
+        손절가: tech_floor = MA120 × 0.92  (disp120 역산)
+        리스크 거리: (Close - tech_floor) / Close  [최소 5%]
+        비중: (ACCOUNT_RISK_LIMIT / risk_dist) × 100  [캡: MAX_WEIGHT]
+        """
+        curr_p  = float(latest.get('Close') or 0.0)
+        disp120 = float(latest.get('disp120', 100) or 100)
+
+        if curr_p <= 0:
+            return {"stop_loss": 0.0, "risk_pct": 5.0, "ei": 0.0, "weight": 1.0}
+
+        tech_floor = (curr_p / (disp120 / 100.0)) * 0.92   # MA120 × 0.92
+        risk_dist  = (curr_p - tech_floor) / (curr_p + 1e-10)
+        risk_dist  = max(risk_dist, 0.05)                   # 최소 5%
+
+        ei         = round(self.EI_BENCHMARK / (risk_dist + 1e-10), 2)
         weight_raw = (self.ACCOUNT_RISK_LIMIT / (risk_dist + 1e-10)) * 100
-        
+
         return {
-            "stop_loss": round(final_stop, 2),
-            "risk_pct": round(risk_dist * 100, 2),
-            "ei": ei,
-            "weight": round(min(weight_raw, self.MAX_WEIGHT), 1)
+            "stop_loss": round(tech_floor, 2),
+            "risk_pct":  round(risk_dist * 100, 2),
+            "ei":        ei,
+            "weight":    round(min(weight_raw, self.MAX_WEIGHT), 1)
         }
 
     def _calculate_livermore_logic(self, df):

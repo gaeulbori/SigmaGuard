@@ -44,15 +44,16 @@ for d in [CACHE_DIR, RESULTS_DIR, LOG_DIR]:
     os.makedirs(d, exist_ok=True)
 
 # ── 시뮬레이션 파라미터 ────────────────────────────────────────────────────────
-SIM_START        = "2020-01-01"
-SIM_END          = "2024-12-31"
+SIM_START        = "2015-01-01"
+SIM_END          = "2025-06-30"
 FETCH_START      = "2014-01-01"   # 5y 시그마 확보를 위한 선행 데이터
 INIT_KRW         = 40_000_000     # KRW 초기 자금
 INIT_USD         = 10_000.0       # USD 초기 자금
-MAX_HOLDINGS     = 10             # 최대 동시 보유 종목 (통합 모드)
-MAX_HOLDINGS_KRW = 5              # KRW 전용 슬롯 (분리 모드)
-MAX_HOLDINGS_USD = 5              # USD 전용 슬롯 (분리 모드)
-MAX_WEIGHT_PCT   = 3.0            # 종목당 최대 비중 (%)
+MAX_HOLDINGS          = 10        # 최대 동시 보유 종목 (통합 모드)
+MAX_HOLDINGS_KRW      = 10        # KRW 전용 슬롯 (분리 모드) — C 조합 기본값
+MAX_HOLDINGS_USD      = 10        # USD 전용 슬롯 (분리 모드) — C 조합 기본값
+MAX_POSITIONS_PER_TICKER = 1      # 동일 종목 당일 중복 진입 금지
+MAX_WEIGHT_PCT   = 5.0            # 종목당 최대 비중 (%) — C 조합 기본값
 ACCOUNT_RISK     = 0.008          # 단일 종목 최대 손실 허용 (0.8%)
 
 # ── 시뮬레이션 레저 53컬럼 (sigma_guard_ledger 포맷 호환) ─────────────────────
@@ -160,7 +161,7 @@ class PreComputeEngine:
             self.logger.info(f"  🔍 [{idx:>3}/{total}] {ticker:>15} — 지표 산출 중...")
 
             # 1. 전체 기간 지표 계산 (Look-ahead 없음: 과거 데이터 전체 사용)
-            ind_df, bench_df = self.indicators.generate(ticker, period="10y", bench=bench)
+            ind_df, bench_df = self.indicators.generate(ticker, period="max", bench=bench)
 
             if ind_df is None or ind_df.empty:
                 self.logger.warning(f"  ⚠️  [{ticker}] 데이터 없음 — 스킵")
@@ -260,9 +261,12 @@ class PortfolioSimulator:
     """
 
     # ── ATR 파라미터 (파라미터 민감도 분석용 기본값) ───────────────────────────
-    ATR_LOW  = 2.0    # 수익 +5~20% 구간
-    ATR_MID  = 2.5    # 수익 +20~50% 구간
-    ATR_HIGH = 3.0    # 수익 +50%+ 구간
+    ATR_LOW  = 3.0    # USD: 수익 +5~20% 구간 (완만)
+    ATR_MID  = 4.0    # USD: 수익 +20~50% 구간 (완만)
+    ATR_HIGH = 5.0    # USD: 수익 +50%+ 구간 (완만)
+    ATR_LOW_KRW  = 6.0    # KRW: 추세 지속형, 더 느슨하게 (완만)
+    ATR_MID_KRW  = 8.0
+    ATR_HIGH_KRW = 10.0
     TRAIL_PROFIT_FLOOR  = 5.0     # 트레일링 스탑 활성화 최소 수익률(%)
     ENTRY_SCORE_MAX     = 31.0    # 진입 허용 최대 점수
     ENTRY_MIN_OPTIONAL  = 2       # B~E 충족 최소 개수
@@ -270,22 +274,34 @@ class PortfolioSimulator:
     TIME_OPP_DAYS       = 90
     TIME_OPP_PCT        = 5.0
 
-    def __init__(self, atr_low=None, atr_mid=None, atr_high=None, entry_min=None,
+    def __init__(self, atr_low=None, atr_mid=None, atr_high=None,
+                 atr_low_krw=None, atr_mid_krw=None, atr_high_krw=None,
+                 entry_min=None,
                  market_filter=None, max_holdings=None, max_weight_pct=None,
-                 max_holdings_krw=None, max_holdings_usd=None):
+                 max_holdings_krw=None, max_holdings_usd=None,
+                 entry_score_max=None, entry_e_mandatory=False,
+                 entry_liv_block=False, entry_liv_halfweight=False):
         self.logger      = setup_custom_logger("PortfolioSimulator")
         self.risk_engine = RiskEngine()
 
         # 파라미터 민감도 오버라이드 지원
-        self.atr_low        = atr_low       or self.ATR_LOW
-        self.atr_mid        = atr_mid       or self.ATR_MID
-        self.atr_high       = atr_high      or self.ATR_HIGH
-        self.entry_min      = entry_min     or self.ENTRY_MIN_OPTIONAL
-        self.max_holdings   = max_holdings  or MAX_HOLDINGS
-        self.max_weight_pct = max_weight_pct if max_weight_pct is not None else MAX_WEIGHT_PCT
-        # 통화 분리 슬롯 (None = 통합 모드 유지)
-        self.max_holdings_krw = max_holdings_krw  # KRW 전용 슬롯 수
-        self.max_holdings_usd = max_holdings_usd  # USD 전용 슬롯 수
+        self.atr_low               = atr_low          or self.ATR_LOW
+        self.atr_mid               = atr_mid          or self.ATR_MID
+        self.atr_high              = atr_high         or self.ATR_HIGH
+        # KRW 전용 ATR (추세 지속형, 더 느슨하게)
+        self.atr_low_krw           = atr_low_krw      or self.ATR_LOW_KRW
+        self.atr_mid_krw           = atr_mid_krw      or self.ATR_MID_KRW
+        self.atr_high_krw          = atr_high_krw     or self.ATR_HIGH_KRW
+        self.entry_min             = entry_min        or self.ENTRY_MIN_OPTIONAL
+        self.entry_score_max       = entry_score_max  if entry_score_max is not None else self.ENTRY_SCORE_MAX
+        self.entry_e_mandatory     = entry_e_mandatory     # True → 조건 E 미충족 시 진입 거부
+        self.entry_liv_block       = entry_liv_block       # True → 리버모어 할인 구간(≥0.15) 진입 금지
+        self.entry_liv_halfweight  = entry_liv_halfweight  # True → 0.30 구간 비중 50% 축소
+        self.max_holdings     = max_holdings   or MAX_HOLDINGS
+        self.max_weight_pct   = max_weight_pct if max_weight_pct   is not None else MAX_WEIGHT_PCT
+        # 통화 분리 슬롯 — None 전달 시 전역 상수로 설정 (분리 모드 활성)
+        self.max_holdings_krw = max_holdings_krw if max_holdings_krw is not None else MAX_HOLDINGS_KRW
+        self.max_holdings_usd = max_holdings_usd if max_holdings_usd is not None else MAX_HOLDINGS_USD
 
         # ── 환율 캐시 ──────────────────────────────────────────────────────────
         self.fx_krw = self._load_fx("USDKRW=X")
@@ -296,6 +312,7 @@ class PortfolioSimulator:
         # ── 포트폴리오 상태 ────────────────────────────────────────────────────
         self.cash_krw = float(INIT_KRW)
         self.cash_usd = float(INIT_USD)
+        self.entry_ledger: list[dict] = []   # 진입 시점 레저 (Fix 5)
 
         # holdings[ticker] = {qty, avg_price, entry_price, entry_date, entry_stop, trailing_high}
         self.holdings: dict[str, dict] = {}
@@ -430,7 +447,7 @@ class PortfolioSimulator:
         trades_path = os.path.join(RESULTS_DIR, "closed_trades.csv")
         pd.DataFrame(self.closed_trades).to_csv(trades_path, index=False, encoding='utf-8')
 
-        self._save_sim_ledger(cache_map)
+        self._save_sim_ledger()
 
         self.logger.info(
             f"💾 시뮬레이션 완료 — "
@@ -443,6 +460,9 @@ class PortfolioSimulator:
         fx_rate = self._get_fx_rate(date)
 
         # ── 1. 청산 신호 우선 처리 ────────────────────────────────────────────
+        # 당일 보유 중이거나 청산된 종목은 당일 재진입 금지 (MAX_POSITIONS_PER_TICKER=1)
+        touched_today: set[str] = set(self.holdings.keys())
+
         exit_signals = []
         for ticker, h in list(self.holdings.items()):
             row = self._get_row(cache_map, ticker, date)
@@ -460,13 +480,14 @@ class PortfolioSimulator:
         # 청산 집행
         for ticker, price, reason, ratio in exit_signals:
             self._execute_exit(ticker, price, ratio, reason, date)
+            touched_today.add(ticker)  # 당일 청산 종목도 재진입 차단
 
         # ── 2. 진입 신호 체크 ─────────────────────────────────────────────────
         # 어느 통화든 슬롯이 남아 있을 때만 탐색
         if self._slot_open('KRW') or self._slot_open('USD'):
             entry_candidates = []
             for ticker in cache_map:
-                if ticker in self.holdings:
+                if ticker in touched_today:  # 보유 중 or 당일 청산 종목 제외
                     continue
                 currency = _get_currency(ticker)
                 # 해당 통화 슬롯이 꽉 찼으면 스킵 (분리/통합 모드 자동 처리)
@@ -480,8 +501,14 @@ class PortfolioSimulator:
                     continue
 
                 score = float(row.get('Score', 99) or 99)
-                if score >= self.ENTRY_SCORE_MAX:
+                if score >= self.entry_score_max:
                     continue
+
+                # 리버모어 할인 구간 진입 차단 (신고가권 ≥ 0.15)
+                if self.entry_liv_block:
+                    liv_discount = float(row.get('liv_discount', 0) or 0)
+                    if liv_discount >= 0.15:
+                        continue
 
                 # 전날 점수 (조건 E용)
                 prev_row   = self._get_prev_row(cache_map, ticker, date)
@@ -506,8 +533,14 @@ class PortfolioSimulator:
                     continue
 
                 # 투입 비중: min(risk_based_weight, max_weight_pct)
+                # liv_discount 0.30 구간은 비중 50% 축소 (연간 신고가권 과투자 방지)
                 weight_pct = self._calc_entry_weight(row)
-                invest_amt = pf_value * (min(weight_pct, self.max_weight_pct) / 100.0)
+                if self.entry_liv_halfweight:
+                    liv_discount = float(row.get('liv_discount', 0) or 0)
+                    weight_cap   = self.max_weight_pct * 0.5 if liv_discount >= 0.30 else self.max_weight_pct
+                else:
+                    weight_cap   = self.max_weight_pct
+                invest_amt = pf_value * (min(weight_pct, weight_cap) / 100.0)
                 invest_amt = min(invest_amt, avail)
 
                 if invest_amt < curr:  # 최소 1주 매수 가능한지 확인
@@ -515,7 +548,7 @@ class PortfolioSimulator:
 
                 qty        = invest_amt / curr
                 stop_loss  = self._calc_stop_loss(row, curr)
-                self._execute_entry(ticker, curr, qty, stop_loss, date, currency, conditions)
+                self._execute_entry(ticker, curr, qty, stop_loss, date, currency, conditions, row=row)
 
         # ── 3. 일별 잔고 기록 ─────────────────────────────────────────────────
         self._record_daily(date, cache_map, fx_rate)
@@ -537,32 +570,37 @@ class PortfolioSimulator:
         if entry_stop > 0 and curr_price < entry_stop:
             return "entry_stop", 1.0
 
-        # ── 신호 2: 리스크 레벨 8/9 ──────────────────────────────────────────
-        level = int(row.get('Risk_Level', 0) or 0)
-        if level >= 9:
-            return "risk_lv9", 1.0
-        if level >= 8:
-            return "risk_lv8", 0.70
-
-        # ── 신호 3: 트레일링 스탑 ─────────────────────────────────────────────
+        # ── 신호 2: 트레일링 스탑 (수익 보호 전용) ───────────────────────────────
         if profit_pct >= self.TRAIL_PROFIT_FLOOR:
             atr = float(row.get('atr', 0) or 0)
             if atr > 0:
-                grade, sell_ratio = self._calc_trailing_grade(
-                    ticker, h, row, curr_price, atr, profit_pct, cache_map, date
-                )
-                if grade >= 2 and sell_ratio > 0:
-                    reason = f"trail_grade{grade}"
-                    return reason, sell_ratio
-                # trailing_high 갱신 (grade 0~1)
-                new_high = max(curr_price, float(h.get('trailing_high', 0) or 0))
+                # 통화별 ATR 배수 선택
+                currency = h.get('currency', 'USD')
+                if currency == 'KRW':
+                    mult = (self.atr_high_krw if profit_pct >= 50.0
+                            else self.atr_mid_krw if profit_pct >= 20.0
+                            else self.atr_low_krw)
+                else:
+                    mult = (self.atr_high if profit_pct >= 50.0
+                            else self.atr_mid if profit_pct >= 20.0
+                            else self.atr_low)
+
+                # trailing_high 갱신
+                old_high = float(h.get('trailing_high', 0) or 0)
+                new_high = max(curr_price, old_high)
                 h['trailing_high'] = new_high
 
-        # ── 신호 4: 시간 기반 청산 ────────────────────────────────────────────
+                trail_stop = new_high - atr * mult
+
+                # trail_stop 이탈 시 전량 청산
+                if curr_price < trail_stop:
+                    return "trail_stop", 1.0
+
+        # ── 신호 3: 시간 기반 청산 ────────────────────────────────────────────
         entry_date_str = h.get('entry_date', '')
         if entry_date_str:
             try:
-                entry_dt  = datetime.strptime(entry_date_str, '%Y-%m-%d')
+                entry_dt   = datetime.strptime(entry_date_str, '%Y-%m-%d')
                 current_dt = datetime.strptime(date.strftime('%Y-%m-%d'), '%Y-%m-%d')
                 elapsed    = (current_dt - entry_dt).days
 
@@ -573,78 +611,30 @@ class PortfolioSimulator:
             except (ValueError, AttributeError):
                 pass
 
+        # ── 신호 4: 리스크 레벨 8/9 ──────────────────────────────────────────
+        level = int(row.get('Risk_Level', 0) or 0)
+        if level >= 9:
+            return "risk_lv9", 1.0
+        if level >= 8:
+            return "risk_lv8", 0.70
+
         return None, 0.0
 
-    def _calc_trailing_grade(self, ticker, h, row, curr_price, atr, profit_pct,
-                              cache_map, date) -> tuple[int, float]:
-        """ATR 다축 트레일링 스탑 등급 계산 (PortfolioSimulator 내부 복제 버전)"""
-        # ATR 배수 결정
-        if profit_pct >= 50.0:
-            mult = self.atr_high
-        elif profit_pct >= 20.0:
-            mult = self.atr_mid
-        else:
-            mult = self.atr_low
-
-        # trailing_high 갱신
-        old_high = float(h.get('trailing_high', 0) or 0)
-        new_high = max(curr_price, old_high)
-        h['trailing_high'] = new_high
-
-        trail_stop = new_high - atr * mult
-
-        # 축1: 가격 이탈
-        axis1 = bool(curr_price < trail_stop)
-
-        # 축2: 점수 레벨 6+(≥61) + 직전 2일 연속 상승
-        score  = float(row.get('Score', 0) or 0)
-        axis2  = False
-        if score >= 61.0:
-            hist2 = self._get_score_history(cache_map, ticker, date, n=2)
-            if len(hist2) >= 2:
-                rising_hist = all(hist2[i] < hist2[i+1] for i in range(len(hist2)-1))
-                axis2 = rising_hist and (hist2[-1] < score)
-
-        # 축3: 수급 약화 2/3 이상
-        prev_row  = self._get_prev_row(cache_map, ticker, date)
-        prev2_row = self._get_prev_row(cache_map, ticker, date, offset=2)
-        axis3     = False
-        if prev_row is not None and prev2_row is not None:
-            mfi0 = float(row.get('MFI', 50) or 50)
-            rsi0 = float(row.get('RSI', 50) or 50)
-            m0   = float(row.get('macd_h', 0)      or 0)
-            m1   = float(prev_row.get('macd_h', 0)  or 0)
-            m2   = float(prev2_row.get('macd_h', 0) or 0)
-            adx0 = float(row.get('ADX', 0)          or 0)
-            adx1 = float(prev_row.get('ADX', 0)     or 0)
-            flags = {
-                'mfi_rsi': mfi0 < rsi0,
-                'macd':    m2 > m1 > m0,
-                'adx':     adx0 < adx1,
-            }
-            axis3 = sum(flags.values()) >= 2
-
-        # 등급 및 분할 비율
-        if   axis1 and axis2 and axis3: grade = 3
-        elif axis1 and axis2:           grade = 2
-        elif axis1 or  axis2:           grade = 1
-        else:                           grade = 0
-
-        sell_ratio = 0.0
-        if grade == 3:
-            sell_ratio = 1.0
-        elif grade == 2:
-            sell_ratio = 0.30 if profit_pct >= 50.0 else 0.50
-
-        return grade, sell_ratio
+    # _calc_trailing_grade 은 단순화된 trail_stop 방식으로 대체됨 (2026-02)
+    # def _calc_trailing_grade(...): ...
 
     # ── 진입 트리거 판단 ──────────────────────────────────────────────────────
     def _check_entry_trigger(self, score, row, prev_row, prev_score) -> tuple[bool, list]:
         """check_entry_trigger 로직 — 캐시 데이터 기반 복제"""
-        if score >= self.ENTRY_SCORE_MAX:
+        if score >= self.entry_score_max:
             return False, []
 
         if row is None or prev_row is None:
+            return False, []
+
+        # E 필수 체크 (entry_e_mandatory=True 시 E 미충족이면 즉시 거부)
+        e_met = prev_score is not None and score < prev_score
+        if self.entry_e_mandatory and not e_met:
             return False, []
 
         optional = 0
@@ -672,7 +662,7 @@ class PortfolioSimulator:
             met.append(f"D: MFI 과매도 반등 ({mfi1:.1f}→{mfi0:.1f})")
 
         # E: 전일 대비 점수 개선
-        if prev_score is not None and score < prev_score:
+        if e_met:
             optional += 1
             met.append(f"E: 점수 개선 ({prev_score:.1f}→{score:.1f})")
 
@@ -681,32 +671,34 @@ class PortfolioSimulator:
     # ── 진입 비중 계산 ────────────────────────────────────────────────────────
     def _calc_entry_weight(self, row) -> float:
         """
-        apply_risk_management 로직 단순화 버전.
-        stop_loss ← disp120 기반 tech floor (92% 룰)
-        weight    ← ACCOUNT_RISK / risk_dist (캡: MAX_WEIGHT_PCT)
+        포지션 비중 계산.
+        공식: tech_floor = MA120 × 0.92  (MA120 = close / (disp120/100))
+              risk_dist  = (close - tech_floor) / close
+              weight     = ACCOUNT_RISK / risk_dist   [캡: max_weight_pct]
+        _calc_stop_loss()와 동일한 tech_floor 기준을 사용하므로 두 함수는 일관됨.
         """
         close   = float(row.get('Close', 0) or 0)
         disp120 = float(row.get('disp120', 100) or 100)
         if close <= 0:
             return 1.0
 
-        # 기술적 손절 기준 (이격도 기반 지지선의 92%)
-        tech_floor  = (close / (disp120 / 100.0)) * 0.92
-        risk_dist   = (close - tech_floor) / (close + 1e-10)
-        risk_dist   = max(risk_dist, 0.05)   # 최소 5% 리스크 거리 보장
+        tech_floor = (close / (disp120 / 100.0)) * 0.92   # MA120 × 0.92
+        risk_dist  = (close - tech_floor) / (close + 1e-10)
+        risk_dist  = max(risk_dist, 0.05)   # 최소 5% 리스크 거리 보장
 
-        weight_raw  = (ACCOUNT_RISK / risk_dist) * 100.0
+        weight_raw = (ACCOUNT_RISK / risk_dist) * 100.0
         return round(min(weight_raw, self.max_weight_pct), 2)
 
     def _calc_stop_loss(self, row, curr_price: float) -> float:
-        """진입 시점의 손절가 계산 (disp120 기반 tech floor)"""
+        """진입 시점의 손절가 = MA120 × 0.92 (disp120 역산)"""
         disp120 = float(row.get('disp120', 100) or 100)
         if disp120 <= 0:
             return curr_price * 0.90
         return round((curr_price / (disp120 / 100.0)) * 0.92, 4)
 
     # ── 거래 집행 ─────────────────────────────────────────────────────────────
-    def _execute_entry(self, ticker, price, qty, stop_loss, date, currency, conditions=None):
+    def _execute_entry(self, ticker, price, qty, stop_loss, date, currency,
+                       conditions=None, row=None):
         invest = price * qty
         if currency == "KRW":
             self.cash_krw -= invest
@@ -729,6 +721,9 @@ class PortfolioSimulator:
             f"(stop={stop_loss:.2f}, invest={invest:.0f}{currency})"
         )
         self._log_signal(date, ticker, "BUY", price, None, 0.0, 0, 0.0, "entry_trigger")
+        # 진입 시점 레저 수집 (Fix 5: _save_sim_ledger 용)
+        if row is not None:
+            self.entry_ledger.append({'date': date, 'ticker': ticker, 'row': row})
 
     def _execute_exit(self, ticker, price, ratio, reason, date):
         if ticker not in self.holdings:
@@ -864,17 +859,18 @@ class PortfolioSimulator:
             'Holdings':           len(self.holdings),
         })
 
-    def _save_sim_ledger(self, cache_map: dict, path: str = None):
+    def _save_sim_ledger(self, cache_map: dict = None, path: str = None):
         """
-        시뮬레이션 기간(SIM_START~SIM_END) 전 종목×전 날짜의 53컬럼 레저를 CSV로 저장.
+        진입 이벤트(self.entry_ledger)만 53컬럼 레저로 저장.
         sigma_guard_ledger 포맷과 컬럼 구조 동일 (SIM_LEDGER_COLS 참조).
         """
         path = path or os.path.join(RESULTS_DIR, "sim_ledger.csv")
         rows = []
-        for ticker, df in cache_map.items():
-            sim_df = df[SIM_START:SIM_END]
-            for date, row in sim_df.iterrows():
-                rows.append({
+        for event in self.entry_ledger:
+            date   = event['date']
+            ticker = event['ticker']
+            row    = event['row']
+            rows.append({
                     'Audit_Date':      date.strftime('%Y-%m-%d'),
                     'Ticker':          ticker,
                     'Name':            '',
@@ -992,8 +988,8 @@ class PerformanceReporter:
         daily  = pd.read_csv(daily_path, parse_dates=['Date'])
         trades = pd.read_csv(trades_path, parse_dates=['Date']) if os.path.exists(trades_path) else pd.DataFrame()
 
-        # 포트폴리오 일별 잔고 스냅샷 행 추출 (신호 행과 분리)
-        daily_pf = daily[daily['Portfolio_KRW'].notna()].copy()
+        # 포트폴리오 일별 잔고 스냅샷 행 추출 (Signal 컬럼으로 명확히 구분)
+        daily_pf = daily[daily['Signal'] == 'DAILY_SNAPSHOT'].copy()
         daily_pf.sort_values('Date', inplace=True)
         daily_pf.set_index('Date', inplace=True)
 
@@ -1137,11 +1133,13 @@ class PerformanceReporter:
             self.logger.info("  ※ cache_map 미제공 — 민감도 분석 건너뜀")
             return
 
+        # 민감도 분석 기본 파라미터 (슬롯·비중은 전역 기본값으로 고정, ATR/entry만 변경)
+        _base = dict(max_holdings=MAX_HOLDINGS, max_weight_pct=MAX_WEIGHT_PCT)
         configs = [
-            ("기본  (ATR×2/2.5/3, entry≥2)",   dict(atr_low=2.0, atr_mid=2.5, atr_high=3.0, entry_min=2)),
-            ("타이트(ATR×1.5/2/2.5, entry≥2)", dict(atr_low=1.5, atr_mid=2.0, atr_high=2.5, entry_min=2)),
-            ("루즈  (ATR×2.5/3/4, entry≥2)",    dict(atr_low=2.5, atr_mid=3.0, atr_high=4.0, entry_min=2)),
-            ("엄격진입(ATR×2/2.5/3, entry≥3)",  dict(atr_low=2.0, atr_mid=2.5, atr_high=3.0, entry_min=3)),
+            ("기본  (ATR×2/2.5/3, entry≥2)",   {**_base, **dict(atr_low=2.0, atr_mid=2.5, atr_high=3.0, entry_min=2)}),
+            ("타이트(ATR×1.5/2/2.5, entry≥2)", {**_base, **dict(atr_low=1.5, atr_mid=2.0, atr_high=2.5, entry_min=2)}),
+            ("루즈  (ATR×2.5/3/4, entry≥2)",   {**_base, **dict(atr_low=2.5, atr_mid=3.0, atr_high=4.0, entry_min=2)}),
+            ("엄격진입(ATR×2/2.5/3, entry≥3)", {**_base, **dict(atr_low=2.0, atr_mid=2.5, atr_high=3.0, entry_min=3)}),
         ]
 
         # 시장 필터 1회 사전 로드 (4개 설정 공유 → 중복 다운로드 방지)
@@ -1239,64 +1237,20 @@ if __name__ == "__main__":
         print(f"   기간: {SIM_START} ~ {SIM_END}")
         print("=" * 70, flush=True)
 
-        # ── [Step 1] 지표 생성 + 캐시 저장 ───────────────────────────
+        # ── [Step 1] 지표 생성 + 캐시 저장 (PreComputeEngine 재사용) ──
         print(f"\n  📡 [Step 1] {ticker_test} 지표 생성 및 캐시 저장...", flush=True)
-        ind  = Indicators()
-        reng = RiskEngine()
-        ind_df, bench_df = ind.generate(ticker_test, period="10y", bench=None)
-
-        if ind_df is None or ind_df.empty:
-            print(f"  ❌ [{ticker_test}] 데이터 없음")
-            sys.exit(1)
-
-        sim_mask  = (ind_df.index >= SIM_START) & (ind_df.index <= SIM_END)
-        sim_dates = ind_df.index[sim_mask]
-        print(f"  시뮬 기간 거래일: {len(sim_dates)}일")
-
-        df_res_full = []
-        prev_ema    = None
-        for date in sim_dates:
-            ind_slice   = ind_df[:date]
-            bench_slice = bench_df[:date] if (bench_df is not None and not bench_df.empty) else None
-            if len(ind_slice) < 30:
-                continue
-            score, _, details = reng.evaluate(ind_slice, bench_slice, prev_ema)
-            level = reng.get_level(score)
-            if details:
-                prev_ema = {
-                    'p1_ema': details.get('p1_ema', details.get('p1', 0)),
-                    'p2_ema': details.get('p2_ema', details.get('p2', 0)),
-                    'p4_ema': details.get('p4_ema', details.get('p4', 0)),
-                }
-            row_val = ind_df.loc[date]
-            r = {'Date': date.strftime('%Y-%m-%d')}
-            for col in PreComputeEngine.IND_COLS:
-                r[col] = row_val.get(col, np.nan) if hasattr(row_val, 'get') else np.nan
-            r.update({
-                'Score':        round(float(score), 2),
-                'Risk_Level':   int(level),
-                'p1':           round(float(details.get('p1',      0)),    2) if details else 0.0,
-                'p2':           round(float(details.get('p2',      0)),    2) if details else 0.0,
-                'p4':           round(float(details.get('p4',      0)),    2) if details else 0.0,
-                'p1_ema':       round(float(details.get('p1_ema',  0)),    2) if details else 0.0,
-                'p2_ema':       round(float(details.get('p2_ema',  0)),    2) if details else 0.0,
-                'p4_ema':       round(float(details.get('p4_ema',  0)),    2) if details else 0.0,
-                'scenario':     details.get('scenario',     '')                if details else '',
-                'liv_discount': round(float(details.get('liv_discount', 0)), 4) if details else 0.0,
-                'sop_action':   details.get('action',       '')                if details else '',
-            })
-            df_res_full.append(r)
-
-        del ind_df, bench_df
-        gc.collect()
-
-        if not df_res_full:
-            print(f"  ❌ [{ticker_test}] 유효 결과 없음")
-            sys.exit(1)
-
-        df_cache   = pd.DataFrame(df_res_full)
+        engine     = PreComputeEngine()
         cache_path = os.path.join(CACHE_DIR, f"{safe_name}_computed.csv")
-        df_cache.to_csv(cache_path, index=False, encoding='utf-8')
+        success    = engine._compute_ticker(ticker_test, bench=None,
+                                            cache_path=cache_path, idx=1, total=1)
+        if not success:
+            print(f"  ❌ [{ticker_test}] 데이터 없음 또는 계산 오류")
+            sys.exit(1)
+
+        # CSV 로드 (Date는 문자열로 유지하여 미리보기에서 직접 사용)
+        df_cache = pd.read_csv(cache_path)
+        df_cache.index = pd.to_datetime(df_cache['Date'])
+        df_cache.sort_index(inplace=True)
 
         # 최근 20일 미리보기
         sample = df_cache.tail(20)
@@ -1305,7 +1259,7 @@ if __name__ == "__main__":
         print(f"  {'-'*58}")
         for _, r in sample.iterrows():
             print(
-                f"  {r['Date']:<12} {r['Close']:>10.2f} "
+                f"  {str(r['Date'])[:10]:<12} {r['Close']:>10.2f} "
                 f"{r['Score']:>7.2f} {int(r['Risk_Level']):>3} "
                 f"{r['p1']:>6.2f} {r['p2']:>6.2f} {r['p4']:>6.2f}"
             )
@@ -1325,12 +1279,9 @@ if __name__ == "__main__":
         sim = PortfolioSimulator()
 
         # 캐시 직접 주입 (단독 종목)
-        cache_df        = df_cache.copy()
-        cache_df.index  = pd.to_datetime(cache_df['Date'])
-        cache_df.sort_index(inplace=True)
-        cache_map_single = {ticker_test: cache_df}
+        cache_map_single = {ticker_test: df_cache}
 
-        all_dates = sorted(cache_df[SIM_START:SIM_END].index)
+        all_dates = sorted(df_cache[SIM_START:SIM_END].index)
         print(f"  시뮬레이션 거래일: {len(all_dates)}일")
 
         for date in all_dates:
@@ -1342,10 +1293,10 @@ if __name__ == "__main__":
         ledger_path_single  = os.path.join(RESULTS_DIR, f"sim_ledger_{safe_name}.csv")
         pd.DataFrame(sim.daily_log).to_csv(log_path_single, index=False, encoding='utf-8')
         pd.DataFrame(sim.closed_trades).to_csv(trades_path_single, index=False, encoding='utf-8')
-        sim._save_sim_ledger(cache_map_single, path=ledger_path_single)
+        sim._save_sim_ledger(path=ledger_path_single)
 
         # 최종 잔고: 일별 스냅샷의 마지막 행 (미청산 포지션 포함)
-        snap_rows = [r for r in sim.daily_log if r.get('Portfolio_KRW') is not None]
+        snap_rows = [r for r in sim.daily_log if r.get('Signal') == 'DAILY_SNAPSHOT']
         if snap_rows and currency_test == 'USD':
             final_pf = float(snap_rows[-1].get('Portfolio_USD', init_pf))
         elif snap_rows:

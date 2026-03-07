@@ -53,6 +53,7 @@ class Indicators:
         self.P_R2 = 20
         self.P_DISP = 120
         self.P_SIGMA_BASE = 252  # 1년 거래일
+        self._bench_cache = {}  # 벤치마크 캐시: {(ticker, period): processed_df} — SPY 등 반복 다운로드 방지
 
     def fetch_data(self, ticker, period="6y"):
         """[v8.9.7] 5년 통계 확보를 위한 6년치 데이터 로드"""
@@ -81,19 +82,23 @@ class Indicators:
 
     def generate(self, ticker, period="6y", bench=None):
         """타겟 종목과 벤치마크 지수의 지표를 동시에 산출"""
-        
+
         # 1. 타겟 데이터 산출
         target_df = self._process_single_ticker(ticker, period)
         if target_df is None or target_df.empty:
             return None, None
 
-        # 2. 벤치마크 데이터 산출 (있을 경우만)
+        # 2. 벤치마크 데이터 산출 — 캐시 우선 사용 (SPY 등 반복 다운로드 방지)
         bench_df = pd.DataFrame()
         if bench:
-            bench_df = self._process_single_ticker(bench, period)
+            cache_key = (bench, period)
+            if cache_key not in self._bench_cache:
+                logger.info(f"   📥 [벤치마크 캐시 미스] {bench} 다운로드 (이후 캐시 재사용)")
+                self._bench_cache[cache_key] = self._process_single_ticker(bench, period)
+            raw_bench = self._bench_cache[cache_key]
             # [v9.0.9 핵심] 타겟 데이터의 날짜 인덱스에 맞춰 벤치마크 데이터 싱크 조절
-            if not bench_df.empty:
-                bench_df = bench_df.reindex(target_df.index).ffill()
+            if raw_bench is not None and not raw_bench.empty:
+                bench_df = raw_bench.reindex(target_df.index).ffill()
 
         return target_df, bench_df
 

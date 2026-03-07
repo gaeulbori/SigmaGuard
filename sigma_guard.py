@@ -9,6 +9,7 @@
 - Performance Feedback: DB 기반 실전 매매 통계와 CSV 기반 리스크 예측력을 통합 분석.
 """
 
+import time
 import pandas as pd
 from datetime import datetime
 
@@ -410,6 +411,7 @@ class SigmaGuard:
         macro_snapshot = self.ledger._get_macro_snapshot() or {}
 
         # 2. 전수 조사 실행
+        # time.sleep(2): 티커 간 간격으로 CPU 순간 점유율 분산 (OCI 안정성 보호)
         for item in total_audit_list:
             audit_data, ind_df = self.run_audit(item, macro_snapshot)
             if audit_data:
@@ -423,11 +425,11 @@ class SigmaGuard:
                     if prev is None: new_stocks.append(msg)
                     elif audit_data['score'] > prev: risk_up.append(msg)
                     else: risk_down.append(msg)
+            time.sleep(2)
 
         # 2.5 사후 결산(update_forward_returns) — 감사 루프 완료 후 일괄 처리
         # run_audit() 내부에서 호출하면 yfinance hang 시 전체 루프가 중단되므로 분리
         # time.sleep(1): 티커 간 간격으로 yfinance rate limit 회피 및 OCI 부하 분산
-        import time
         for ticker in list(audit_results_summary.keys()):
             try:
                 self.ledger.update_forward_returns(ticker)

@@ -200,5 +200,70 @@ class TestIndicatorsAudit(unittest.TestCase):
         self.assertGreaterEqual(last_limit, 110.0)
         print(f"✅ 이격 임계치 하한선(110.0) 방어 확인 (현재: {last_limit:.2f}%)")
 
+class TestBenchmarkCache(unittest.TestCase):
+    """벤치마크 캐시 동작 검증"""
+
+    def setUp(self):
+        self.indicators = Indicators()
+
+    def test_15_bench_cache_reuses_existing_entry(self):
+        """검증 15: 동일 벤치마크 2회 요청 시 캐시를 재사용하고 다운로드를 1회만 수행하는가"""
+        import numpy as np
+        from unittest.mock import patch, MagicMock
+
+        n = 300
+        mock_df = pd.DataFrame({
+            'Open':   np.ones(n) * 100,
+            'High':   np.ones(n) * 105,
+            'Low':    np.ones(n) * 95,
+            'Close':  np.linspace(100, 150, n),
+            'Volume': np.ones(n) * 1_000_000,
+        }, index=pd.date_range('2019-01-01', periods=n, freq='B'))
+
+        call_count = {'n': 0}
+        original_fetch = self.indicators.fetch_data
+
+        def mock_fetch(ticker, period="6y"):
+            call_count['n'] += 1
+            return mock_df.copy()
+
+        with patch.object(self.indicators, 'fetch_data', side_effect=mock_fetch):
+            # 첫 번째 요청: target=A, bench=SPY → fetch 2회 (target+bench)
+            self.indicators.generate('A', bench='SPY')
+            calls_after_first = call_count['n']
+
+            # 두 번째 요청: target=B, bench=SPY → fetch 1회 (target만, SPY는 캐시)
+            self.indicators.generate('B', bench='SPY')
+            calls_after_second = call_count['n']
+
+        # 첫 요청 2회, 두 번째 요청 1회(bench 캐시 재사용) → 총 3회
+        self.assertEqual(calls_after_first, 2, "첫 요청에서 fetch 2회(target+bench) 확인")
+        self.assertEqual(calls_after_second - calls_after_first, 1, "두 번째 요청에서 bench 캐시 재사용 — fetch 1회")
+        self.assertIn(('SPY', '6y'), self.indicators._bench_cache, "SPY가 캐시에 저장됨")
+        print(f"\n✅ 벤치마크 캐시 검증 — 총 fetch 호출: {calls_after_second}회 (캐시 없었다면 4회)")
+
+    def test_16_bench_cache_isolates_per_period(self):
+        """검증 16: 동일 벤치마크라도 period가 다르면 별도 캐시 키로 분리되는가"""
+        import numpy as np
+        from unittest.mock import patch
+
+        n = 300
+        mock_df = pd.DataFrame({
+            'Open':   np.ones(n) * 100,
+            'High':   np.ones(n) * 105,
+            'Low':    np.ones(n) * 95,
+            'Close':  np.linspace(100, 150, n),
+            'Volume': np.ones(n) * 1_000_000,
+        }, index=pd.date_range('2019-01-01', periods=n, freq='B'))
+
+        with patch.object(self.indicators, 'fetch_data', return_value=mock_df.copy()):
+            self.indicators.generate('A', period='6y', bench='SPY')
+            self.indicators.generate('A', period='3y', bench='SPY')
+
+        self.assertIn(('SPY', '6y'), self.indicators._bench_cache)
+        self.assertIn(('SPY', '3y'), self.indicators._bench_cache)
+        print("\n✅ period별 캐시 키 분리 확인")
+
+
 if __name__ == '__main__':
     unittest.main()
